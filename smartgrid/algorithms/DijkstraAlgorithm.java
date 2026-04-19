@@ -36,14 +36,21 @@ public class DijkstraAlgorithm {
      * @return ordered list of Nodes from source to target; empty if no path found
      */
     public List<Node> run(int fromNodeId) {
-        // Use long to avoid overflow when COST_SCALE is applied
+        return runTo(fromNodeId, -1); // -1 = nearest CityZone
+    }
+
+    /**
+     * Finds the minimum-effectiveCost path from {@code fromNodeId} to {@code toNodeId}.
+     * If toNodeId == -1, stops at the nearest CityZone (original behavior).
+     * @return ordered list of Nodes from source to target; empty if no path found
+     */
+    public List<Node> runTo(int fromNodeId, int toNodeId) {
         Map<Integer, Long> dist = new HashMap<>();
         Map<Integer, Integer> prev = new HashMap<>();
 
         for (Node n : graph.getNodes()) dist.put(n.id, Long.MAX_VALUE);
         dist.put(fromNodeId, 0L);
 
-        // Min-heap: long[] {scaledCost, nodeId}
         PriorityQueue<long[]> heap = new PriorityQueue<>(Comparator.comparingLong(a -> a[0]));
         heap.offer(new long[]{0L, fromNodeId});
 
@@ -59,7 +66,11 @@ public class DijkstraAlgorithm {
             Node curNode = graph.getNode(curId);
             if (curNode == null || curNode.status == NodeStatus.ISOLATED) continue;
 
-            if (curNode.type == NodeType.CITY_ZONE) {
+            // Stop when we reach the explicit target, or nearest CityZone if toNodeId == -1
+            boolean reached = (toNodeId == -1)
+                    ? curNode.type == NodeType.CITY_ZONE
+                    : curId == toNodeId;
+            if (reached && curId != fromNodeId) {
                 targetId = curId;
                 break;
             }
@@ -83,10 +94,11 @@ public class DijkstraAlgorithm {
         int cur = targetId;
         while (cur != fromNodeId) {
             path.add(0, graph.getNode(cur));
-            cur = prev.get(cur);
+            Integer p = prev.get(cur);
+            if (p == null) return new ArrayList<>(); // disconnected
+            cur = p;
         }
         path.add(0, graph.getNode(fromNodeId));
-
         return path;
     }
 }

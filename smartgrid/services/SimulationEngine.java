@@ -40,6 +40,8 @@ public class SimulationEngine {
     private int preFaultFlow;
     private Set<Integer> lastFlowReceivers;
     private List<Node> dijkstraPath;
+    /** Scaled cost of the last Dijkstra run (divide by Edge.COST_SCALE for display). */
+    private long dijkstraLastCost = 0;
 
     /** Weight vector for composite edge cost. Defaults reproduce original behavior. */
     private CostWeights weights;
@@ -71,47 +73,97 @@ public class SimulationEngine {
     // -------------------------------------------------------------------------
 
     /**
-     * Builds the hardcoded 10-node, 12-edge energy network topology.
+     * Builds the realistic 14-node, 22-edge energy network topology.
+     *
+     * Sources  (4): Solar, Wind, Hydro, Nuclear
+     * Substations (5): Sub-A … Sub-E
+     * City Zones  (5): Hospital, Industry, Residential ×2, Commercial
+     *
+     * Key design decisions for realism:
+     *  - Hospital (Zone-1) has TWO feeders (Sub-A + Sub-D) for redundancy
+     *  - Nuclear feeds Sub-D exclusively → zero-carbon, high-reliability path to Hospital
+     *  - Sub-A ↔ Sub-B and Sub-B ↔ Sub-C backup cross-links enable rerouting
+     *  - Industry (Zone-2) has three possible upstream paths
+     *  - Commercial (Zone-5) added as a 4th zone type
+     *
+     * Node IDs (assigned in insertion order):
+     *   0=Solar  1=Wind  2=Hydro  3=Nuclear
+     *   4=Sub-A  5=Sub-B  6=Sub-C  7=Sub-D  8=Sub-E
+     *   9=Zone-1(Hospital)  10=Zone-2(Industry)
+     *   11=Zone-3(Residential)  12=Zone-4(Residential)  13=Zone-5(Commercial)
+     *
      * Time complexity: O(V + E)
      */
     public void buildTopology() {
         graph = new Graph();
 
-        graph.addNode("Solar",  NodeType.ENERGY_SOURCE, 80,  80,  1);
-        graph.addNode("Wind",   NodeType.ENERGY_SOURCE, 80,  240, 2);
-        graph.addNode("Hydro",  NodeType.ENERGY_SOURCE, 80,  400, 3);
-        graph.addNode("Sub-A",  NodeType.SUBSTATION,    300, 120, 0);
-        graph.addNode("Sub-B",  NodeType.SUBSTATION,    300, 280, 0);
-        graph.addNode("Sub-C",  NodeType.SUBSTATION,    300, 420, 0);
-        graph.addNode("Zone-1", NodeType.CITY_ZONE,     540, 80,  0);
-        graph.addNode("Zone-2", NodeType.CITY_ZONE,     540, 200, 0);
-        graph.addNode("Zone-3", NodeType.CITY_ZONE,     540, 340, 0);
-        graph.addNode("Zone-4", NodeType.CITY_ZONE,     540, 460, 0);
+        // --- Energy Sources ---
+        graph.addNode("Solar",   NodeType.ENERGY_SOURCE, 70,  60,  1); // id=0
+        graph.addNode("Wind",    NodeType.ENERGY_SOURCE, 70,  190, 2); // id=1
+        graph.addNode("Hydro",   NodeType.ENERGY_SOURCE, 70,  330, 3); // id=2
+        graph.addNode("Nuclear", NodeType.ENERGY_SOURCE, 70,  460, 1); // id=3  high-reliability
 
-        graph.addEdge(0, 3, 10, 1); // Solar  → Sub-A
-        graph.addEdge(0, 4, 8,  2); // Solar  → Sub-B
-        graph.addEdge(1, 3, 7,  2); // Wind   → Sub-A
-        graph.addEdge(1, 5, 9,  1); // Wind   → Sub-C
-        graph.addEdge(2, 4, 6,  3); // Hydro  → Sub-B
-        graph.addEdge(2, 5, 8,  2); // Hydro  → Sub-C
-        graph.addEdge(3, 6, 5,  1); // Sub-A  → Zone-1
-        graph.addEdge(3, 7, 6,  2); // Sub-A  → Zone-2
-        graph.addEdge(4, 7, 4,  1); // Sub-B  → Zone-2
-        graph.addEdge(4, 8, 7,  2); // Sub-B  → Zone-3
-        graph.addEdge(5, 8, 5,  1); // Sub-C  → Zone-3
-        graph.addEdge(5, 9, 6,  2); // Sub-C  → Zone-4
+        // --- Substations ---
+        graph.addNode("Sub-A",   NodeType.SUBSTATION,    260, 90,  0); // id=4
+        graph.addNode("Sub-B",   NodeType.SUBSTATION,    260, 230, 0); // id=5
+        graph.addNode("Sub-C",   NodeType.SUBSTATION,    260, 370, 0); // id=6
+        graph.addNode("Sub-D",   NodeType.SUBSTATION,    260, 480, 0); // id=7  Nuclear feeder
+        graph.addNode("Sub-E",   NodeType.SUBSTATION,    260, 150, 0); // id=8  Solar+Wind backup
 
-        // Assign carbon costs (kg CO₂ per unit of energy) reflecting source type.
-        // Solar edges: ~0 carbon; Wind: very low; Hydro: low; transmission lines: small fixed cost.
-        // Stored on the Edge objects after construction via the adjacency list.
+        // --- City Zones ---
+        Node zone1 = graph.addNode("Zone-1", NodeType.CITY_ZONE, 490, 60,  0); // id=9  Hospital
+        Node zone2 = graph.addNode("Zone-2", NodeType.CITY_ZONE, 490, 180, 0); // id=10 Industry
+        Node zone3 = graph.addNode("Zone-3", NodeType.CITY_ZONE, 490, 300, 0); // id=11 Residential
+        Node zone4 = graph.addNode("Zone-4", NodeType.CITY_ZONE, 490, 400, 0); // id=12 Residential
+        Node zone5 = graph.addNode("Zone-5", NodeType.CITY_ZONE, 490, 490, 0); // id=13 Commercial
+
+        // Zone classifications
+        zone1.zoneClass = ZoneClassification.HOSPITAL;     // Reliability-first
+        zone2.zoneClass = ZoneClassification.INDUSTRY;     // CO2-first
+        zone3.zoneClass = ZoneClassification.RESIDENTIAL;  // Cost-first
+        zone4.zoneClass = ZoneClassification.RESIDENTIAL;  // Cost-first
+        zone5.zoneClass = ZoneClassification.COMMERCIAL;   // Balanced
+
+        // Zone capacities (for load bar visualisation)
+        zone1.capacity = 12;
+        zone2.capacity = 15;
+        zone3.capacity = 10;
+        zone4.capacity = 10;
+        zone5.capacity = 8;
+
+        // --- Source → Substation edges ---
+        graph.addEdge(0, 4, 10, 1); // Solar   → Sub-A
+        graph.addEdge(0, 8, 8,  2); // Solar   → Sub-E  (backup path)
+        graph.addEdge(1, 4, 7,  2); // Wind    → Sub-A
+        graph.addEdge(1, 5, 9,  1); // Wind    → Sub-B
+        graph.addEdge(2, 5, 6,  3); // Hydro   → Sub-B
+        graph.addEdge(2, 6, 8,  2); // Hydro   → Sub-C
+        graph.addEdge(3, 7, 12, 1); // Nuclear → Sub-D  (dedicated Hospital feeder)
+
+        // --- Cross-substation backup links (enable rerouting) ---
+        graph.addEdge(4, 5, 5,  2); // Sub-A ↔ Sub-B  (backup)
+        graph.addEdge(5, 6, 5,  2); // Sub-B ↔ Sub-C  (backup)
+        graph.addEdge(8, 4, 6,  1); // Sub-E  → Sub-A  (Solar backup feeds Sub-A)
+
+        // --- Substation → Zone edges ---
+        graph.addEdge(4,  9, 5,  1); // Sub-A → Zone-1 (Hospital)  primary
+        graph.addEdge(7,  9, 8,  1); // Sub-D → Zone-1 (Hospital)  Nuclear backup ← KEY
+        graph.addEdge(4, 10, 6,  2); // Sub-A → Zone-2 (Industry)
+        graph.addEdge(5, 10, 4,  1); // Sub-B → Zone-2 (Industry)  backup
+        graph.addEdge(8, 10, 5,  2); // Sub-E → Zone-2 (Industry)  3rd path
+        graph.addEdge(5, 11, 7,  2); // Sub-B → Zone-3 (Residential)
+        graph.addEdge(6, 11, 5,  1); // Sub-C → Zone-3 (Residential) backup
+        graph.addEdge(6, 12, 6,  2); // Sub-C → Zone-4 (Residential)
+        graph.addEdge(7, 13, 5,  2); // Sub-D → Zone-5 (Commercial)
+        graph.addEdge(6, 13, 4,  3); // Sub-C → Zone-5 (Commercial) backup
+
         assignCarbonCosts();
 
-        fenwick = new FenwickTree(4);
+        // SegmentTree and FenwickTree over 5 CityZones
+        int zoneCount = 5;
+        fenwick  = new FenwickTree(zoneCount);
+        segTree  = new SegmentTree(zoneCount);
 
-        // SegmentTree over 4 CityZones — rebuilt from currentLoad after each MCMF run
-        segTree = new SegmentTree(4);
-
-        // UnionFind over all nodes — rebuilt from live graph edges
         rebuildUnionFind();
 
         minHeap = new PriorityQueue<>();
@@ -120,10 +172,10 @@ public class SimulationEngine {
         }
 
         stats = new SimStats();
-        preFaultFlow = 0;
+        preFaultFlow  = 0;
         faultTimestamp = 0;
         lastFlowReceivers = new HashSet<>();
-        dijkstraPath = new ArrayList<>();
+        dijkstraPath  = new ArrayList<>();
     }
 
     // -------------------------------------------------------------------------
@@ -158,28 +210,30 @@ public class SimulationEngine {
     // -------------------------------------------------------------------------
 
     /**
-     * Assigns carbonCost values to every edge based on the energy source type
-     * at the upstream end of each path segment.
+     * Assigns carbonCost values to every edge based on the source node's label.
+     * This is label-based so it works correctly regardless of node insertion order.
      *
      * Carbon factors (kg CO₂ per unit of energy):
-     *   Solar edges (from=0)  : 0.01  — near-zero lifecycle emissions
-     *   Wind  edges (from=1)  : 0.02  — very low lifecycle emissions
-     *   Hydro edges (from=2)  : 0.05  — low but non-zero (reservoir methane)
-     *   Substation→Zone edges : 0.03  — transmission line losses / infrastructure
-     *
-     * Called once from buildTopology() after all edges are created.
+     *   Solar   : 0.01  — near-zero lifecycle emissions
+     *   Wind    : 0.02  — very low lifecycle emissions
+     *   Hydro   : 0.05  — low but non-zero (reservoir methane)
+     *   Nuclear : 0.00  — zero operational carbon (used for Hospital reliability path)
+     *   Substation→Zone : 0.03 — transmission line losses
      */
     private void assignCarbonCosts() {
+        // Build label lookup for fast access
+        Map<Integer, String> idToLabel = new HashMap<>();
+        for (Node n : graph.getNodes()) idToLabel.put(n.id, n.label);
+
         for (List<Edge> edges : graph.getAdjList().values()) {
             for (Edge e : edges) {
-                if (e.from == 0) {
-                    e.carbonCost = 0.01; // Solar
-                } else if (e.from == 1) {
-                    e.carbonCost = 0.02; // Wind
-                } else if (e.from == 2) {
-                    e.carbonCost = 0.05; // Hydro
-                } else {
-                    e.carbonCost = 0.03; // Substation → Zone transmission
+                String srcLabel = idToLabel.getOrDefault(e.from, "");
+                switch (srcLabel) {
+                    case "Solar":   e.carbonCost = 0.01; break;
+                    case "Wind":    e.carbonCost = 0.02; break;
+                    case "Hydro":   e.carbonCost = 0.05; break;
+                    case "Nuclear": e.carbonCost = 0.00; break; // zero-carbon
+                    default:        e.carbonCost = 0.03; break; // substation transmission
                 }
             }
         }
@@ -280,12 +334,21 @@ public class SimulationEngine {
     // -------------------------------------------------------------------------
 
     /**
-     * Resets all nodes to ACTIVE, recomputes edge costs, runs MCMF, updates FenwickTree.
-     * Time complexity: dominated by MCMF — O(V * E * F)
+     * Resets all nodes to ACTIVE, recomputes edge costs using per-zone weights,
+     * runs MCMF, updates FenwickTree with per-zone energy totals.
+     *
+     * Per-zone routing: each CityZone's ZoneClassification carries its own
+     * CostWeights. We run MCMF once per zone type with that zone's weights,
+     * so Hospital paths are optimised for reliability, Industry for carbon, etc.
+     *
+     * Time complexity: dominated by MCMF — O(Z * V * E * F) where Z = zone types
      */
     public void runNormalDistribution() {
         for (Node n : graph.getNodes()) n.status = NodeStatus.ACTIVE;
 
+        // Single MCMF pass with global weights — routes to ALL zones simultaneously.
+        // Per-zone weights are applied in Dijkstra click routing (runDijkstraSmartClick),
+        // not here, because MCMF resets edge flows each pass which would erase earlier zones.
         recomputeEffectiveCosts();
 
         MCMFAlgorithm mcmf = new MCMFAlgorithm(graph, weights);
@@ -293,22 +356,24 @@ public class SimulationEngine {
         preFaultFlow = result.totalFlow;
         lastFlowReceivers = result.flowReceivers;
 
-        // Adaptive: update edge costs from observed performance
         if (adaptiveMode) {
             weightUpdateService.processRun(graph.getAdjList(), currentFaultedIds);
             recomputeEffectiveCosts();
         }
 
-        // Refresh SegmentTree with latest zone loads from MCMF flow
         refreshSegmentTree();
         computeCarbonFootprint();
+        stats.preFaultCarbonKg = stats.totalCarbonKg;
+        stats.carbonIncreasePct = 0.0;
 
+        // FenwickTree: update each zone with its actual currentLoad
+        fenwick.reset();
         int fenwickIdx = 1;
         for (Node n : graph.getNodes()) {
-            if (n.type == NodeType.CITY_ZONE && lastFlowReceivers.contains(n.id)) {
-                fenwick.update(fenwickIdx, stats.totalEnergyRouted / Math.max(1, lastFlowReceivers.size()));
+            if (n.type == NodeType.CITY_ZONE) {
+                fenwick.update(fenwickIdx, n.currentLoad);
+                fenwickIdx++;
             }
-            if (n.type == NodeType.CITY_ZONE) fenwickIdx++;
         }
     }
 
@@ -384,6 +449,15 @@ public class SimulationEngine {
         refreshSegmentTree();
         computeCarbonFootprint();
 
+        // Compute how much CO2 increased vs the pre-fault baseline
+        // Solar (lowest carbon) is gone — Wind/Hydro carry more load → higher CO2
+        if (stats.preFaultCarbonKg > 0) {
+            stats.carbonIncreasePct = (stats.totalCarbonKg - stats.preFaultCarbonKg)
+                                      / stats.preFaultCarbonKg * 100.0;
+        } else {
+            stats.carbonIncreasePct = 0.0;
+        }
+
         stats.recoveryTimeMs = System.currentTimeMillis() - faultTimestamp;
 
         if (preFaultFlow > 0) {
@@ -409,14 +483,81 @@ public class SimulationEngine {
     // -------------------------------------------------------------------------
 
     /**
+     * Smart click handler: if the clicked node is a CITY_ZONE, runs Dijkstra
+     * from the best available source TO that zone (shows incoming supply path).
+     * Otherwise runs from the node to the nearest CityZone.
+     */
+    public List<Node> runDijkstraSmartClick(int clickedNodeId) {
+        Node clicked = graph.getNode(clickedNodeId);
+        if (clicked == null) return new ArrayList<>();
+
+        if (clicked.type == NodeType.CITY_ZONE) {
+            // Find the best source → this zone using zone's own priority weights
+            CostWeights zoneWeights = clicked.zoneClass != null
+                    ? clicked.zoneClass.weights : weights;
+            for (List<Edge> edges : graph.getAdjList().values()) {
+                for (Edge e : edges) e.computeEffectiveCost(zoneWeights);
+            }
+
+            // Try every active source, keep the cheapest path to this zone
+            List<Node> bestPath = new ArrayList<>();
+            long bestCost = Long.MAX_VALUE;
+            DijkstraAlgorithm dijk = new DijkstraAlgorithm(graph, zoneWeights);
+            for (Node src : graph.getNodes()) {
+                if (src.type == NodeType.ENERGY_SOURCE && src.status == NodeStatus.ACTIVE) {
+                    List<Node> p = dijk.runTo(src.id, clickedNodeId);
+                    if (!p.isEmpty()) {
+                        long c = computePathCost(p);
+                        if (c < bestCost) { bestCost = c; bestPath = p; }
+                    }
+                }
+            }
+            dijkstraPath = bestPath;
+            dijkstraLastCost = bestCost == Long.MAX_VALUE ? 0 : bestCost;
+            recomputeEffectiveCosts(); // restore global weights
+            return dijkstraPath;
+        }
+
+        // Non-zone node: run to nearest CityZone as before
+        return runDijkstra(clickedNodeId);
+    }
+
+    /**
      * Runs Dijkstra from the given node to the nearest CityZone.
-     * Time complexity: O((V + E) log V)
      */
     public List<Node> runDijkstra(int fromNodeId) {
         recomputeEffectiveCosts();
         DijkstraAlgorithm dijkstra = new DijkstraAlgorithm(graph, weights);
         dijkstraPath = dijkstra.run(fromNodeId);
+        dijkstraLastCost = computePathCost(dijkstraPath);
         return dijkstraPath;
+    }
+
+    /**
+     * Runs Dijkstra from {@code fromNodeId} to an explicit {@code toNodeId}.
+     */
+    public List<Node> runDijkstra(int fromNodeId, int toNodeId) {
+        recomputeEffectiveCosts();
+        DijkstraAlgorithm dijkstra = new DijkstraAlgorithm(graph, weights);
+        dijkstraPath = dijkstra.runTo(fromNodeId, toNodeId);
+        dijkstraLastCost = computePathCost(dijkstraPath);
+        return dijkstraPath;
+    }
+
+    /** Returns the total effectiveCost of the last Dijkstra path (unscaled). */
+    public double getDijkstraPathCost() {
+        return dijkstraLastCost / (double) Edge.COST_SCALE;
+    }
+
+    private long computePathCost(List<Node> path) {
+        long total = 0;
+        for (int i = 0; i < path.size() - 1; i++) {
+            int from = path.get(i).id, to = path.get(i + 1).id;
+            for (Edge e : graph.getNeighbors(from)) {
+                if (e.to == to) { total += e.scaledEffectiveCost(); break; }
+            }
+        }
+        return total;
     }
 
     // -------------------------------------------------------------------------
@@ -494,6 +635,44 @@ public class SimulationEngine {
 
     /** Returns the SegmentTree for direct access if needed. */
     public SegmentTree getSegmentTree() { return segTree; }
+
+    // -------------------------------------------------------------------------
+    // FenwickTree query API
+    // -------------------------------------------------------------------------
+
+    /**
+     * Returns cumulative energy delivered to zones 1..zoneIdx (1-based, inclusive).
+     * Uses the FenwickTree prefix-sum in O(log Z).
+     * Displayed live in the UI as "Zones 1–N total load".
+     */
+    public int queryFenwickPrefix(int zoneIdx) {
+        return fenwick.query(zoneIdx);
+    }
+
+    /**
+     * Returns the ordered list of CityZone nodes (sorted by insertion order / id).
+     * Used by the UI to map 1-based Fenwick indices back to zone labels.
+     */
+    public List<Node> getZoneNodes() {
+        List<Node> zones = new ArrayList<>();
+        for (Node n : graph.getNodes()) {
+            if (n.type == NodeType.CITY_ZONE) zones.add(n);
+        }
+        zones.sort((a, b) -> Integer.compare(a.id, b.id));
+        return zones;
+    }
+
+    /**
+     * Returns all node risk scores as a map nodeId → riskScore.
+     * Used by the UI to render the live risk heatmap.
+     */
+    public Map<Integer, Double> getAllRiskScores() {
+        Map<Integer, Double> scores = new HashMap<>();
+        for (Node n : graph.getNodes()) {
+            scores.put(n.id, predictionEngine.getRiskScore(n.id));
+        }
+        return scores;
+    }
 
     // -------------------------------------------------------------------------
     // UnionFind query API

@@ -47,6 +47,12 @@ public class Node implements Comparable<Node> {
     public double carbonFactor;
 
     /**
+     * Zone classification for CITY_ZONE nodes — defines routing priority.
+     * Null for ENERGY_SOURCE and SUBSTATION nodes.
+     */
+    public ZoneClassification zoneClass;
+
+    /**
      * Original constructor — all extended fields get safe defaults.
      * Existing call sites in SimulationEngine are unaffected.
      */
@@ -65,6 +71,7 @@ public class Node implements Comparable<Node> {
         this.failureProbability = 0.0;
         this.reliabilityScore = 1.0;
         this.carbonFactor = 0.0;
+        this.zoneClass = null;
     }
 
     @Override

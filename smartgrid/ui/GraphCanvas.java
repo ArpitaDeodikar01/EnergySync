@@ -73,9 +73,12 @@ public class GraphCanvas extends JPanel {
                 }
                 if (nearest != null && minDist <= NODE_RADIUS * 2.5) {
                     if (selectionListener != null) selectionListener.onNodeSelected(nearest);
-                    List<Node> path = engine.runDijkstra(nearest.id);
+                    // Smart click: zones show incoming supply path; sources/subs show outgoing path
+                    List<Node> path = engine.runDijkstraSmartClick(nearest.id);
                     if (path.isEmpty()) {
-                        statsBarUpdater.setText(" No path available from " + nearest.label);
+                        statsBarUpdater.setText(
+                            "<html><font color='#ff8888'> No path available for "
+                            + nearest.label + "</font></html>");
                     } else {
                         statsBarUpdater.update();
                     }
@@ -192,36 +195,72 @@ public class GraphCanvas extends JPanel {
     // -------------------------------------------------------------------------
 
     private void drawNodes(Graphics2D g2, Graph graph, List<Node> dijkPath) {
+        java.util.Set<Integer> pathIds = new java.util.HashSet<>();
+        for (Node p : dijkPath) pathIds.add(p.id);
+
         for (Node n : graph.getNodes()) {
-            // Risk glow
             double risk = engine.getPredictionEngine().getRiskScore(n.id);
+
+            // Risk glow (red halo for high-risk nodes)
             if (risk > HIGH_RISK_THR && n.status == NodeStatus.ACTIVE) {
-                g2.setColor(new Color(255, 80, 80, 55));
-                g2.fillOval(n.x - NODE_RADIUS - 7, n.y - NODE_RADIUS - 7,
-                        (NODE_RADIUS + 7) * 2, (NODE_RADIUS + 7) * 2);
+                int glowR = NODE_RADIUS + 7 + (int)(risk * 6);
+                g2.setColor(new Color(255, 80, 80, 45));
+                g2.fillOval(n.x - glowR, n.y - glowR, glowR * 2, glowR * 2);
+            }
+
+            // Dijkstra path glow (bright blue halo)
+            if (pathIds.contains(n.id)) {
+                g2.setColor(new Color(60, 160, 255, 70));
+                g2.fillOval(n.x - NODE_RADIUS - 6, n.y - NODE_RADIUS - 6,
+                        (NODE_RADIUS + 6) * 2, (NODE_RADIUS + 6) * 2);
             }
 
             Color fill = nodeColor(n, dijkPath, risk);
             g2.setColor(fill);
             g2.fillOval(n.x - NODE_RADIUS, n.y - NODE_RADIUS, NODE_RADIUS * 2, NODE_RADIUS * 2);
 
-            g2.setColor(Color.WHITE);
-            g2.setStroke(new BasicStroke(2f));
+            // Zone classification ring
+            if (n.type == NodeType.CITY_ZONE && n.zoneClass != null) {
+                g2.setColor(n.zoneClass.color);
+                g2.setStroke(new BasicStroke(3f));
+                g2.drawOval(n.x - NODE_RADIUS - 4, n.y - NODE_RADIUS - 4,
+                        (NODE_RADIUS + 4) * 2, (NODE_RADIUS + 4) * 2);
+            }
+
+            // Node border — thicker + cyan for path nodes
+            if (pathIds.contains(n.id)) {
+                g2.setColor(new Color(100, 200, 255));
+                g2.setStroke(new BasicStroke(3f));
+            } else {
+                g2.setColor(Color.WHITE);
+                g2.setStroke(new BasicStroke(2f));
+            }
             g2.drawOval(n.x - NODE_RADIUS, n.y - NODE_RADIUS, NODE_RADIUS * 2, NODE_RADIUS * 2);
 
+            // Label
             g2.setFont(new Font("SansSerif", Font.BOLD, 11));
             FontMetrics fm = g2.getFontMetrics();
             int tw = fm.stringWidth(n.label);
             g2.setColor(Color.WHITE);
             g2.drawString(n.label, n.x - tw / 2, n.y + fm.getAscent() / 2 - 1);
 
-            g2.setFont(new Font("SansSerif", Font.PLAIN, 9));
-            g2.setColor(new Color(160, 160, 180));
-            String tag = n.type == NodeType.ENERGY_SOURCE ? "src"
-                       : n.type == NodeType.SUBSTATION     ? "sub" : "zone";
-            g2.drawString(tag, n.x - 8, n.y + NODE_RADIUS + 12);
+            // Zone classification label below node
+            if (n.type == NodeType.CITY_ZONE && n.zoneClass != null) {
+                g2.setFont(new Font("SansSerif", Font.PLAIN, 9));
+                g2.setColor(n.zoneClass.color);
+                String classLabel = n.zoneClass.displayName;
+                int labelW = g2.getFontMetrics().stringWidth(classLabel);
+                g2.drawString(classLabel, n.x - labelW / 2, n.y + NODE_RADIUS + 14);
+            } else {
+                g2.setFont(new Font("SansSerif", Font.PLAIN, 9));
+                g2.setColor(new Color(160, 160, 180));
+                String tag = n.type == NodeType.ENERGY_SOURCE ? "src"
+                           : n.type == NodeType.SUBSTATION     ? "sub" : "zone";
+                g2.drawString(tag, n.x - 8, n.y + NODE_RADIUS + 12);
+            }
 
             if (n.type == NodeType.CITY_ZONE && n.capacity > 0) drawLoadBar(g2, n);
+            drawRiskBar(g2, n, risk);
         }
     }
 
@@ -235,6 +274,23 @@ public class GraphCanvas extends JPanel {
                 : frac < 0.8 ? new Color(220, 200, 0)
                              : new Color(220, 60, 60);
         g2.setColor(c);
+        g2.fillRect(bx, by, (int)(bw * frac), bh);
+    }
+
+    /** Draws a small risk bar below the load bar (or below the node for non-zones). */
+    private void drawRiskBar(Graphics2D g2, Node n, double risk) {
+        if (risk <= 0.01) return;
+        int bw = NODE_RADIUS * 2, bh = 3;
+        int bx = n.x - NODE_RADIUS;
+        // Place below load bar if zone with capacity, else just below node label
+        int by = (n.type == NodeType.CITY_ZONE && n.capacity > 0)
+                ? n.y + NODE_RADIUS + 22
+                : n.y + NODE_RADIUS + 16;
+        double frac = Math.min(1.0, risk / 0.8); // saturate at 0.8
+        g2.setColor(new Color(60, 20, 20));
+        g2.fillRect(bx, by, bw, bh);
+        int r = (int)(255 * frac), gr = (int)(80 * (1 - frac));
+        g2.setColor(new Color(r, gr, 40));
         g2.fillRect(bx, by, (int)(bw * frac), bh);
     }
 

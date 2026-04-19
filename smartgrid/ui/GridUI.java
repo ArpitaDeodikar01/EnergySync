@@ -31,6 +31,9 @@ public class GridUI extends JFrame {
     /** Last node clicked on the canvas — used as the fault target. */
     private Node selectedNode = null;
 
+    /** True after a fault is injected and before Auto Reroute is run */
+    private boolean faultPending = false;
+
     // Weight slider value labels
     private final JLabel lblW1 = sliderVal("1.00");
     private final JLabel lblW2 = sliderVal("0.15");
@@ -39,6 +42,9 @@ public class GridUI extends JFrame {
 
     // Adaptive mode toggle
     private final JToggleButton btnAdaptive = new JToggleButton("Adaptive: ON", true);
+
+    // Fenwick prefix-sum labels — updated on every refresh()
+    private final java.util.List<JLabel> fenwickLabels = new java.util.ArrayList<>();
 
     public GridUI(SimulationEngine engine) {
         super("SmartGrid — Adaptive Energy Distribution");
@@ -94,6 +100,14 @@ public class GridUI extends JFrame {
         panel.add(sectionTitle("Simulation"));
         panel.add(Box.createVerticalStrut(8));
 
+        // Zone classification legend
+        panel.add(zoneLegend());
+        panel.add(Box.createVerticalStrut(8));
+
+        // Live Fenwick prefix-sum panel
+        panel.add(fenwickPanel());
+        panel.add(Box.createVerticalStrut(12));
+
         JButton btnRun = makeButton("Run Distribution", new Color(34, 139, 34));
         btnRun.addActionListener(e -> { engine.runNormalDistribution(); refresh(); });
 
@@ -101,19 +115,23 @@ public class GridUI extends JFrame {
         btnFault.addActionListener(e -> injectFaultAction());
 
         JButton btnReroute = makeButton("Auto Reroute", new Color(180, 110, 0));
-        btnReroute.addActionListener(e -> { engine.autoReroute(); refresh(); });
+        btnReroute.addActionListener(e -> { engine.autoReroute(); faultPending = false; refresh(); });
+
+        JButton btnDijkstra = makeButton("Dijkstra Path", new Color(40, 80, 160));
+        btnDijkstra.addActionListener(e -> dijkstraAction());
 
         JButton btnPredict = makeButton("Run Prediction", new Color(60, 100, 180));
         btnPredict.addActionListener(e -> runPrediction());
 
         JButton btnReset = makeButton("Reset", new Color(55, 55, 110));
-        btnReset.addActionListener(e -> { engine.reset(); detailPanel.showEmpty(); refresh(); });
+        btnReset.addActionListener(e -> { engine.reset(); faultPending = false; detailPanel.showEmpty(); refresh(); });
 
-        panel.add(btnRun);     panel.add(vgap(6));
-        panel.add(btnFault);   panel.add(vgap(6));
-        panel.add(btnReroute); panel.add(vgap(6));
-        panel.add(btnPredict); panel.add(vgap(6));
-        panel.add(btnReset);   panel.add(vgap(14));
+        panel.add(btnRun);      panel.add(vgap(6));
+        panel.add(btnFault);    panel.add(vgap(6));
+        panel.add(btnReroute);  panel.add(vgap(6));
+        panel.add(btnDijkstra); panel.add(vgap(6));
+        panel.add(btnPredict);  panel.add(vgap(6));
+        panel.add(btnReset);    panel.add(vgap(14));
 
         // Adaptive mode toggle
         panel.add(sectionTitle("Mode"));
@@ -216,7 +234,65 @@ public class GridUI extends JFrame {
 
         selectedNode = null;
         detailPanel.showEmpty();
+        faultPending = true;
         refresh();
+    }
+
+    // -------------------------------------------------------------------------
+    // Dijkstra src → dst action
+    // -------------------------------------------------------------------------
+
+    private void dijkstraAction() {
+        java.util.List<Node> nodes = new java.util.ArrayList<>(engine.getGraph().getNodes());
+        nodes.sort((a, b) -> Integer.compare(a.id, b.id));
+
+        String[] names = nodes.stream()
+                .map(n -> n.label + " [" + n.type.name().charAt(0) + "]")
+                .toArray(String[]::new);
+
+        // Source picker
+        String srcChoice = (String) JOptionPane.showInputDialog(
+                this, "Select SOURCE node:", "Dijkstra — Source",
+                JOptionPane.PLAIN_MESSAGE, null, names, names[0]);
+        if (srcChoice == null) return;
+
+        // Destination picker — exclude the source
+        String[] dstNames = java.util.Arrays.stream(names)
+                .filter(n -> !n.equals(srcChoice))
+                .toArray(String[]::new);
+        String dstChoice = (String) JOptionPane.showInputDialog(
+                this, "Select DESTINATION node:", "Dijkstra — Destination",
+                JOptionPane.PLAIN_MESSAGE, null, dstNames, dstNames[0]);
+        if (dstChoice == null) return;
+
+        int srcIdx = java.util.Arrays.asList(names).indexOf(srcChoice);
+        int dstIdx = java.util.Arrays.asList(names).indexOf(dstChoice);
+        Node src = nodes.get(srcIdx);
+        Node dst = nodes.get(dstIdx);
+
+        java.util.List<Node> path = engine.runDijkstra(src.id, dst.id);
+        refresh();
+
+        if (path.isEmpty()) {
+            statsBar.setText(String.format(
+                " <html><font color='#ff6666'>No path found: %s → %s</font></html>",
+                src.label, dst.label));
+            JOptionPane.showMessageDialog(this,
+                "No path found between " + src.label + " and " + dst.label + ".\n"
+                + "(Node may be isolated or unreachable.)",
+                "Dijkstra Result", JOptionPane.WARNING_MESSAGE);
+        } else {
+            StringBuilder sb = new StringBuilder();
+            for (int i = 0; i < path.size(); i++) {
+                sb.append(path.get(i).label);
+                if (i < path.size() - 1) sb.append(" → ");
+            }
+            double cost = engine.getDijkstraPathCost();
+            statsBar.setText(String.format(
+                "<html> <font color='#66aaff'>Dijkstra %s → %s</font>"
+                + " &nbsp; Path: %s &nbsp; Cost: %.2f</html>",
+                src.label, dst.label, sb, cost));
+        }
     }
 
     // -------------------------------------------------------------------------
@@ -247,6 +323,14 @@ public class GridUI extends JFrame {
         SimStats s = engine.getStats();
         List<Node> path = engine.getDijkstraPath();
 
+        // Fenwick prefix-sum: cumulative load across all zones
+        List<Node> zones = engine.getZoneNodes();
+        int totalZones = zones.size();
+        int fenwickTotal = totalZones > 0 ? engine.queryFenwickPrefix(totalZones) : 0;
+        int maxLoadZoneIdx = engine.queryMaxLoadZone(); // 1-based
+        String maxZoneLabel = (maxLoadZoneIdx > 0 && maxLoadZoneIdx <= zones.size())
+                ? zones.get(maxLoadZoneIdx - 1).label : "—";
+
         String pathInfo = "";
         if (!path.isEmpty()) {
             StringBuilder sb = new StringBuilder("  Path: ");
@@ -254,23 +338,41 @@ public class GridUI extends JFrame {
                 sb.append(path.get(i).label);
                 if (i < path.size() - 1) sb.append(" → ");
             }
+            // Show zone weights used if path ends at a zone
+            Node dest = path.get(path.size() - 1);
+            if (dest.zoneClass != null) {
+                sb.append(" [").append(dest.zoneClass.displayName).append(" weights]");
+            }
+            sb.append(String.format("  cost=%.2f", engine.getDijkstraPathCost()));
             pathInfo = sb.toString();
         }
 
+        String faultWarning = faultPending
+            ? " &nbsp;<font color='#ffaa00'>&#9888; Fault active — click Auto Reroute</font>"
+            : "";
+
         statsBar.setText(String.format(
-            "<html> Energy: %d &nbsp; Cost: %d &nbsp; Zones: %d &nbsp;"
-            + "Recovery: %d ms &nbsp; Loss: %.1f%% &nbsp;"
-            + "<font color='#66ff99'>&#9679; CO&#8322;: %.3f kg (%.4f/u)</font>"
-            + "%s</html>",
-            s.totalEnergyRouted, s.totalCost, s.zonesAffected,
-            s.recoveryTimeMs, s.flowLossPercent,
-            s.totalCarbonKg, s.carbonPerUnit,
-            pathInfo
+            "<html> Energy: %d &nbsp; Cost: %d &nbsp;"
+            + "<font color='#aaddff'>Fenwick&#8721;: %d &nbsp; MaxLoad: %s</font> &nbsp;"
+            + "Loss: %.1f%% &nbsp;"
+            + "<font color='#66ff99'>CO&#8322;: %.3f kg</font>"
+            + "%s%s%s</html>",
+            s.totalEnergyRouted, s.totalCost,
+            fenwickTotal, maxZoneLabel,
+            s.flowLossPercent,
+            s.totalCarbonKg,
+            s.carbonIncreasePct != 0.0
+                ? String.format(" &nbsp;<font color='#ff6666'>&#8679;CO&#8322; +%.1f%%</font>",
+                                s.carbonIncreasePct)
+                : "",
+            faultWarning,
+            pathInfo.isEmpty() ? "" : " &nbsp;<font color='#88ccff'>" + pathInfo + "</font>"
         ));
     }
 
     private void refresh() {
         updateStatsBar();
+        refreshFenwickPanel();
         canvas.repaint();
     }
 
@@ -367,6 +469,91 @@ public class GridUI extends JFrame {
         dot.setForeground(color);
         JLabel txt = new JLabel(label);
         txt.setForeground(new Color(170, 170, 190));
+        txt.setFont(new Font("SansSerif", Font.PLAIN, 10));
+        row.add(dot);
+        row.add(txt);
+        return row;
+    }
+
+    /** Builds the zone classification legend panel. */
+    private JPanel zoneLegend() {
+        JPanel p = new JPanel();
+        p.setLayout(new BoxLayout(p, BoxLayout.Y_AXIS));
+        p.setBackground(new Color(20, 20, 38));
+        p.setBorder(BorderFactory.createCompoundBorder(
+            BorderFactory.createLineBorder(new Color(60, 60, 100)),
+            BorderFactory.createEmptyBorder(5, 6, 5, 6)
+        ));
+        p.setMaximumSize(new Dimension(Integer.MAX_VALUE, 110));
+
+        JLabel title = new JLabel("Zone Priority");
+        title.setForeground(new Color(100, 160, 255));
+        title.setFont(new Font("SansSerif", Font.BOLD, 11));
+        p.add(title);
+        p.add(vgap(3));
+        p.add(zoneRow(ZoneClassification.HOSPITAL,    "Hospital",    "Reliability"));
+        p.add(vgap(2));
+        p.add(zoneRow(ZoneClassification.INDUSTRY,    "Industry",    "CO\u2082 Min"));
+        p.add(vgap(2));
+        p.add(zoneRow(ZoneClassification.RESIDENTIAL, "Residential", "Cost Min"));
+        p.add(vgap(2));
+        p.add(zoneRow(ZoneClassification.COMMERCIAL,  "Commercial",  "Balanced"));
+        return p;
+    }
+
+    /**
+     * Live Fenwick prefix-sum panel — shows cumulative zone loads queried
+     * from the BIT in O(log Z). Updates on every refresh().
+     */
+    private JPanel fenwickPanel() {
+        JPanel p = new JPanel();
+        p.setLayout(new BoxLayout(p, BoxLayout.Y_AXIS));
+        p.setBackground(new Color(15, 25, 40));
+        p.setBorder(BorderFactory.createCompoundBorder(
+            BorderFactory.createLineBorder(new Color(40, 80, 120)),
+            BorderFactory.createEmptyBorder(5, 6, 5, 6)
+        ));
+        p.setMaximumSize(new Dimension(Integer.MAX_VALUE, 90));
+
+        JLabel title = new JLabel("Fenwick Prefix Sums");
+        title.setForeground(new Color(80, 200, 255));
+        title.setFont(new Font("SansSerif", Font.BOLD, 10));
+        p.add(title);
+        p.add(vgap(3));
+
+        // We'll store labels so refresh() can update them
+        fenwickLabels.clear();
+        List<Node> zones = engine.getZoneNodes();
+        for (int i = 1; i <= zones.size(); i++) {
+            final int idx = i;
+            String zoneName = zones.get(i - 1).label;
+            int prefixVal = engine.queryFenwickPrefix(i);
+            JLabel lbl = new JLabel(String.format("Z1..%d (%s): %d", i, zoneName, prefixVal));
+            lbl.setForeground(new Color(140, 210, 255));
+            lbl.setFont(new Font("Monospaced", Font.PLAIN, 9));
+            fenwickLabels.add(lbl);
+            p.add(lbl);
+        }
+        return p;
+    }
+
+    /** Updates the Fenwick prefix-sum labels in the control panel. */
+    private void refreshFenwickPanel() {
+        List<Node> zones = engine.getZoneNodes();
+        for (int i = 0; i < fenwickLabels.size() && i < zones.size(); i++) {
+            int prefixVal = engine.queryFenwickPrefix(i + 1);
+            fenwickLabels.get(i).setText(
+                String.format("Z1..%d (%s): %d", i + 1, zones.get(i).label, prefixVal));
+        }
+    }
+
+    private JPanel zoneRow(ZoneClassification zc, String name, String priority) {
+        JPanel row = new JPanel(new FlowLayout(FlowLayout.LEFT, 4, 0));
+        row.setBackground(new Color(20, 20, 38));
+        JLabel dot = new JLabel("■");
+        dot.setForeground(zc.color);
+        dot.setFont(new Font("SansSerif", Font.PLAIN, 12));
+        JLabel txt = new JLabel("<html><b>" + name + "</b> <font color='#aaaacc'>→ " + priority + "</font></html>");
         txt.setFont(new Font("SansSerif", Font.PLAIN, 10));
         row.add(dot);
         row.add(txt);

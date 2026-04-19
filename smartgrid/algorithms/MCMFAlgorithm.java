@@ -108,6 +108,11 @@ public class MCMFAlgorithm {
                 fwd.cap -= flow;
                 residual[cur].get(fwd.rev).cap += flow;
 
+                // Write flow back to the real Edge object so GraphCanvas can display it
+                if (fwd.realEdge != null) {
+                    fwd.realEdge.flow += flow;
+                }
+
                 for (Map.Entry<Integer, Integer> entry : idToIdx.entrySet()) {
                     if (entry.getValue() == cur) {
                         Node n = graph.getNode(entry.getKey());
@@ -140,6 +145,13 @@ public class MCMFAlgorithm {
         List<ResidualEdge>[] res = new ArrayList[total];
         for (int i = 0; i < total; i++) res[i] = new ArrayList<>();
 
+        // Reset all edge flows to 0 before a fresh MCMF run
+        for (Node n : activeNodes) {
+            for (Edge e : graph.getNeighbors(n.id)) {
+                e.flow = 0;
+            }
+        }
+
         for (Node n : activeNodes) {
             if (!idToIdx.containsKey(n.id)) continue;
             int u = idToIdx.get(n.id);
@@ -149,8 +161,9 @@ public class MCMFAlgorithm {
                 int fwdIdx = res[u].size();
                 int bwdIdx = res[v].size();
                 int edgeCost = e.scaledEffectiveCost();
-                res[u].add(new ResidualEdge(v, e.capacity, edgeCost, bwdIdx));
-                res[v].add(new ResidualEdge(u, 0, -edgeCost, fwdIdx));
+                // Store reference to the real Edge so we can write flow back after augmentation
+                res[u].add(new ResidualEdge(v, e.capacity, edgeCost, bwdIdx, e));
+                res[v].add(new ResidualEdge(u, 0, -edgeCost, fwdIdx, null));
             }
         }
 

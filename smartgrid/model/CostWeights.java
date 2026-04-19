@@ -20,10 +20,10 @@ public class CostWeights {
 
     /** Default: pure baseCost — identical to original behavior */
     public CostWeights() {
-        this.w1 = 1.0;
-        this.w2 = 0.0;
-        this.w3 = 0.0;
-        this.w4 = 0.0;
+        this.w1 = 0.1;
+        this.w2 = 0.2;
+        this.w3 = 0.25;
+        this.w4 = 0.15;
     }
 
     public CostWeights(double w1, double w2, double w3, double w4) {

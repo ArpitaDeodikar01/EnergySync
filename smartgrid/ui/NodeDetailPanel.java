@@ -32,6 +32,8 @@ public class NodeDetailPanel extends JPanel {
     private final JLabel lblCarbon      = detail("");
     private final JLabel lblRisk        = detail("");
     private final JLabel lblReliability = detail("");
+    private final JLabel lblZoneClass   = detail("");
+    private final JLabel lblPriority    = detail("");
     private final JTextArea txtNeighbors;
 
     public NodeDetailPanel(SimulationEngine engine) {
@@ -69,6 +71,10 @@ public class NodeDetailPanel extends JPanel {
         add(vgap(6));
         add(row("Carbon",      lblCarbon));
         add(vgap(8));
+        add(sectionLabel("Zone Classification"));
+        add(row("Type",        lblZoneClass));
+        add(row("Priority",    lblPriority));
+        add(vgap(8));
         add(sectionLabel("Neighbors"));
         JScrollPane scroll = new JScrollPane(txtNeighbors);
         scroll.setBackground(BG);
@@ -98,6 +104,18 @@ public class NodeDetailPanel extends JPanel {
         lblRisk.setForeground(riskColor(risk));
 
         lblCarbon.setText(String.format("%.3f kg/u", node.carbonFactor));
+
+        // Zone classification info
+        if (node.zoneClass != null) {
+            lblZoneClass.setText(node.zoneClass.displayName);
+            lblZoneClass.setForeground(node.zoneClass.color);
+            lblPriority.setText(node.zoneClass.description);
+            lblPriority.setFont(new Font("SansSerif", Font.ITALIC, 9));
+        } else {
+            lblZoneClass.setText("—");
+            lblZoneClass.setForeground(FG_DIM);
+            lblPriority.setText("");
+        }
 
         // Neighbors
         List<smartgrid.model.Edge> neighbors = engine.getGraph().getNeighbors(node.id);
@@ -129,6 +147,9 @@ public class NodeDetailPanel extends JPanel {
         lblRisk.setText("—");
         lblRisk.setForeground(FG_DIM);
         lblCarbon.setText("—");
+        lblZoneClass.setText("—");
+        lblZoneClass.setForeground(FG_DIM);
+        lblPriority.setText("");
         txtNeighbors.setText("");
     }
 

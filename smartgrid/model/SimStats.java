@@ -25,6 +25,19 @@ public class SimStats {
      */
     public double carbonPerUnit;
 
+    /**
+     * Carbon emitted in the pre-fault normal distribution run.
+     * Used to compute carbonIncreasePct after rerouting.
+     */
+    public double preFaultCarbonKg;
+
+    /**
+     * Percentage increase in carbon emissions after rerouting vs pre-fault.
+     * Positive means more CO₂ (e.g. Solar lost, Hydro/Wind picked up load).
+     * Formula: (totalCarbonKg - preFaultCarbonKg) / preFaultCarbonKg * 100
+     */
+    public double carbonIncreasePct;
+
     public SimStats() {
         totalEnergyRouted = 0;
         totalCost         = 0;
@@ -33,5 +46,7 @@ public class SimStats {
         flowLossPercent   = 0.0;
         totalCarbonKg     = 0.0;
         carbonPerUnit     = 0.0;
+        preFaultCarbonKg  = 0.0;
+        carbonIncreasePct = 0.0;
     }
 }
