@@ -373,8 +373,8 @@ public class SimulationEngine {
         refreshSegmentTree();
         int maxZoneIdx = segTree.queryMaxLoadZone();
         int sumAll     = segTree.queryEnergyRange(1, 5);
-        int minSlack   = segTree.queryMaxLoad(1, 5); // used for reroute destination
-        logDSA("Seg Tree range-max [1-5] → Zone-" + maxZoneIdx + ": " + segTree.queryMaxLoad(maxZoneIdx, maxZoneIdx) + " MW");
+        int maxLoad    = maxZoneIdx > 0 ? segTree.queryMaxLoad(maxZoneIdx, maxZoneIdx) : 0;
+        logDSA("Seg Tree range-max [1-5] → Zone-" + maxZoneIdx + ": " + maxLoad + " MW");
         logDSA("Seg Tree range-sum [1-5] → " + sumAll + " MW total");
 
         computeCarbonFootprint();

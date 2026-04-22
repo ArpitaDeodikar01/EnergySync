@@ -585,9 +585,10 @@ public class GridUI extends JFrame {
         }
         int maxIdx = engine.queryMaxLoadZone();
         int sumAll = engine.queryEnergyRange(1, 5);
-        int minLoad = engine.queryMaxLoad(2, 4); // range min via max query on inverted — use sum/3 approx
+        int minLoad = engine.queryMaxLoad(2, 4);
         String maxLabel = maxIdx > 0 && maxIdx <= zones.size() ? zones.get(maxIdx-1).label : "—";
-        segTreeMaxLabel.setText("Max[1-5]: " + maxLabel + " (" + engine.queryMaxLoad(maxIdx, maxIdx) + " MW)");
+        int maxLoadVal = maxIdx > 0 ? engine.queryMaxLoad(maxIdx, maxIdx) : 0;
+        segTreeMaxLabel.setText("Max[1-5]: " + maxLabel + " (" + maxLoadVal + " MW)");
         segTreeSumLabel.setText("Sum[1-5]: " + sumAll + " MW");
         segTreeMinLabel.setText("Max[2-4]: " + minLoad + " MW");
     }
