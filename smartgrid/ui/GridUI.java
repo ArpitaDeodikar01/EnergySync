@@ -1,6 +1,7 @@
 package smartgrid.ui;
 
 import smartgrid.model.*;
+import smartgrid.algorithms.BellmanFordAlgorithm;
 import smartgrid.services.SimulationEngine;
 
 import javax.swing.*;
@@ -28,45 +29,78 @@ public class GridUI extends JFrame {
     private final NodeDetailPanel  detailPanel;
     private final JLabel           statsBar;
 
-    /** Last node clicked on the canvas — used as the fault target. */
     private Node selectedNode = null;
-
-    /** True after a fault is injected and before Auto Reroute is run */
     private boolean faultPending = false;
 
-    // Weight slider value labels
+    // Weight slider labels
     private final JLabel lblW1 = sliderVal("1.00");
     private final JLabel lblW2 = sliderVal("0.15");
     private final JLabel lblW3 = sliderVal("0.00");
     private final JLabel lblW4 = sliderVal("0.00");
 
-    // Adaptive mode toggle
     private final JToggleButton btnAdaptive = new JToggleButton("Adaptive: ON", true);
-
-    // Fenwick prefix-sum labels — updated on every refresh()
     private final java.util.List<JLabel> fenwickLabels = new java.util.ArrayList<>();
 
+    // Algorithm banner (top-right toast)
+    private final JLabel bannerLabel = new JLabel(" ");
+    private javax.swing.Timer bannerTimer;
+
+    // DSA log panel labels
+    private final JTextArea dsaLogArea = new JTextArea(8, 22);
+
+    // Segment Tree panel labels
+    private final JLabel[] segTreeLabels = new JLabel[5];
+    private final JLabel segTreeMaxLabel = new JLabel("—");
+    private final JLabel segTreeSumLabel = new JLabel("—");
+    private final JLabel segTreeMinLabel = new JLabel("—");
+
+    // Path cost breakdown panel
+    private final JTextArea pathBreakdownArea = new JTextArea(6, 22);
+
+    // Prediction widget
+    private final JLabel predNodeLabel  = new JLabel("—");
+    private final JLabel predRiskLabel  = new JLabel("—");
+    private final JLabel predHistLabel  = new JLabel("—");
+    private final JProgressBar predBar  = new JProgressBar(0, 100);
+
+    // CO₂ dashboard
+    private final JLabel co2RenewLabel  = new JLabel("—");
+    private final JLabel co2TotalLabel  = new JLabel("—");
+    private final JLabel co2SavedLabel  = new JLabel("—");
+
     public GridUI(SimulationEngine engine) {
-        super("SmartGrid — Adaptive Energy Distribution");
+        super("SmartGrid — Adaptive Energy Distribution  |  DSA Competition");
         this.engine = engine;
 
         setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
         setLayout(new BorderLayout());
         getContentPane().setBackground(BG_DARK);
 
+        // Algorithm banner (top)
+        bannerLabel.setFont(new Font("SansSerif", Font.BOLD, 13));
+        bannerLabel.setForeground(new Color(255, 220, 60));
+        bannerLabel.setBackground(new Color(10, 10, 25));
+        bannerLabel.setOpaque(true);
+        bannerLabel.setBorder(BorderFactory.createEmptyBorder(4, 12, 4, 12));
+        bannerLabel.setHorizontalAlignment(SwingConstants.RIGHT);
+
         // Stats bar
         statsBar = new JLabel();
-        statsBar.setFont(new Font("Monospaced", Font.PLAIN, 12));
+        statsBar.setFont(new Font("Monospaced", Font.PLAIN, 11));
         statsBar.setForeground(FG_LIGHT);
         statsBar.setBackground(new Color(15, 15, 28));
         statsBar.setOpaque(true);
-        statsBar.setBorder(BorderFactory.createEmptyBorder(5, 10, 5, 10));
+        statsBar.setBorder(BorderFactory.createEmptyBorder(4, 10, 4, 10));
         updateStatsBar();
 
-        // Node detail panel (west)
+        // Top bar = banner + stats
+        JPanel topBar = new JPanel(new BorderLayout());
+        topBar.setBackground(new Color(10, 10, 25));
+        topBar.add(statsBar,    BorderLayout.CENTER);
+        topBar.add(bannerLabel, BorderLayout.EAST);
+
         detailPanel = new NodeDetailPanel(engine);
 
-        // Graph canvas (center)
         canvas = new GraphCanvas(engine, new GraphCanvas.StatsBarUpdater() {
             @Override public void update()           { updateStatsBar(); }
             @Override public void setText(String t)  { statsBar.setText(t); }
@@ -76,10 +110,18 @@ public class GridUI extends JFrame {
             detailPanel.showNode(node);
         });
 
-        add(canvas,              BorderLayout.CENTER);
-        add(buildControlPanel(), BorderLayout.EAST);
-        add(detailPanel,         BorderLayout.WEST);
-        add(statsBar,            BorderLayout.SOUTH);
+        // Right panel = scrollable control panel
+        JScrollPane ctrlScroll = new JScrollPane(buildControlPanel());
+        ctrlScroll.setHorizontalScrollBarPolicy(JScrollPane.HORIZONTAL_SCROLLBAR_NEVER);
+        ctrlScroll.setVerticalScrollBarPolicy(JScrollPane.VERTICAL_SCROLLBAR_AS_NEEDED);
+        ctrlScroll.setPreferredSize(new Dimension(210, 0));
+        ctrlScroll.setBorder(null);
+
+        add(canvas,      BorderLayout.CENTER);
+        add(ctrlScroll,  BorderLayout.EAST);
+        add(detailPanel, BorderLayout.WEST);
+        add(topBar,      BorderLayout.NORTH);
+        add(buildBottomPanel(), BorderLayout.SOUTH);
 
         pack();
         setLocationRelativeTo(null);
@@ -94,19 +136,18 @@ public class GridUI extends JFrame {
         JPanel panel = new JPanel();
         panel.setLayout(new BoxLayout(panel, BoxLayout.Y_AXIS));
         panel.setBackground(BG_MID);
-        panel.setBorder(BorderFactory.createEmptyBorder(14, 10, 14, 10));
-        panel.setPreferredSize(new Dimension(195, 0));
+        panel.setBorder(BorderFactory.createEmptyBorder(10, 8, 10, 8));
+        panel.setPreferredSize(new Dimension(200, 0));
+
+        // DEMO MODE — top priority
+        JButton btnDemo = makeButton("▶ DEMO MODE", new Color(120, 40, 160));
+        btnDemo.addActionListener(e -> runDemoMode());
+        panel.add(btnDemo); panel.add(vgap(8));
 
         panel.add(sectionTitle("Simulation"));
-        panel.add(Box.createVerticalStrut(8));
-
-        // Zone classification legend
+        panel.add(vgap(4));
         panel.add(zoneLegend());
-        panel.add(Box.createVerticalStrut(8));
-
-        // Live Fenwick prefix-sum panel
-        panel.add(fenwickPanel());
-        panel.add(Box.createVerticalStrut(12));
+        panel.add(vgap(6));
 
         JButton btnRun = makeButton("Run Distribution", new Color(34, 139, 34));
         btnRun.addActionListener(e -> { engine.runNormalDistribution(); refresh(); });
@@ -121,21 +162,21 @@ public class GridUI extends JFrame {
         btnDijkstra.addActionListener(e -> dijkstraAction());
 
         JButton btnPredict = makeButton("Run Prediction", new Color(60, 100, 180));
-        btnPredict.addActionListener(e -> runPrediction());
+        btnPredict.addActionListener(e -> { runPrediction(); refresh(); });
 
         JButton btnReset = makeButton("Reset", new Color(55, 55, 110));
         btnReset.addActionListener(e -> { engine.reset(); faultPending = false; detailPanel.showEmpty(); refresh(); });
 
-        panel.add(btnRun);      panel.add(vgap(6));
-        panel.add(btnFault);    panel.add(vgap(6));
-        panel.add(btnReroute);  panel.add(vgap(6));
-        panel.add(btnDijkstra); panel.add(vgap(6));
-        panel.add(btnPredict);  panel.add(vgap(6));
-        panel.add(btnReset);    panel.add(vgap(14));
+        panel.add(btnRun);      panel.add(vgap(5));
+        panel.add(btnFault);    panel.add(vgap(5));
+        panel.add(btnReroute);  panel.add(vgap(5));
+        panel.add(btnDijkstra); panel.add(vgap(5));
+        panel.add(btnPredict);  panel.add(vgap(5));
+        panel.add(btnReset);    panel.add(vgap(10));
 
-        // Adaptive mode toggle
+        // Adaptive mode
         panel.add(sectionTitle("Mode"));
-        panel.add(vgap(6));
+        panel.add(vgap(4));
         styleToggle(btnAdaptive);
         btnAdaptive.addActionListener(e -> {
             boolean on = btnAdaptive.isSelected();
@@ -143,39 +184,51 @@ public class GridUI extends JFrame {
             btnAdaptive.setText("Adaptive: " + (on ? "ON" : "OFF"));
             btnAdaptive.setBackground(on ? new Color(30, 110, 60) : new Color(90, 40, 40));
         });
-        panel.add(btnAdaptive); panel.add(vgap(14));
+        panel.add(btnAdaptive); panel.add(vgap(10));
 
         // Weight sliders
         panel.add(sectionTitle("Cost Weights"));
-        panel.add(vgap(6));
+        panel.add(vgap(4));
         panel.add(sliderRow("w1 Economy",  lblW1, 100, (int)(engine.getWeights().w1 * 100), v -> {
-            engine.getWeights().w1 = v / 100.0;
-            lblW1.setText(String.format("%.2f", v / 100.0));
+            engine.getWeights().w1 = v / 100.0; lblW1.setText(String.format("%.2f", v/100.0));
             engine.setWeights(engine.getWeights());
         }));
-        panel.add(vgap(4));
+        panel.add(vgap(3));
         panel.add(sliderRow("w2 Carbon",   lblW2, 100, (int)(engine.getWeights().w2 * 100), v -> {
-            engine.getWeights().w2 = v / 100.0;
-            lblW2.setText(String.format("%.2f", v / 100.0));
+            engine.getWeights().w2 = v / 100.0; lblW2.setText(String.format("%.2f", v/100.0));
             engine.setWeights(engine.getWeights());
         }));
-        panel.add(vgap(4));
+        panel.add(vgap(3));
         panel.add(sliderRow("w3 Risk",     lblW3, 100, (int)(engine.getWeights().w3 * 100), v -> {
-            engine.getWeights().w3 = v / 100.0;
-            lblW3.setText(String.format("%.2f", v / 100.0));
+            engine.getWeights().w3 = v / 100.0; lblW3.setText(String.format("%.2f", v/100.0));
             engine.setWeights(engine.getWeights());
         }));
-        panel.add(vgap(4));
+        panel.add(vgap(3));
         panel.add(sliderRow("w4 Latency",  lblW4, 100, (int)(engine.getWeights().w4 * 100), v -> {
-            engine.getWeights().w4 = v / 100.0;
-            lblW4.setText(String.format("%.2f", v / 100.0));
+            engine.getWeights().w4 = v / 100.0; lblW4.setText(String.format("%.2f", v/100.0));
             engine.setWeights(engine.getWeights());
         }));
-        panel.add(vgap(14));
+        panel.add(vgap(10));
+
+        // Prediction widget
+        panel.add(buildPredictionWidget());
+        panel.add(vgap(8));
+
+        // Fenwick panel
+        panel.add(fenwickPanel());
+        panel.add(vgap(8));
+
+        // Segment Tree panel
+        panel.add(buildSegTreePanel());
+        panel.add(vgap(8));
+
+        // CO₂ dashboard
+        panel.add(buildCO2Panel());
+        panel.add(vgap(8));
 
         // Legend
         panel.add(sectionTitle("Legend"));
-        panel.add(vgap(6));
+        panel.add(vgap(4));
         panel.add(makeLegend());
 
         return panel;
@@ -227,11 +280,11 @@ public class GridUI extends JFrame {
         boolean ok = engine.injectFault(target.id);
         if (!ok) {
             JOptionPane.showMessageDialog(this,
-                    "Node '" + target.label + "' could not be faulted (already removed?).",
+                    "Node '" + target.label + "' could not be faulted.",
                     "Inject Fault", JOptionPane.ERROR_MESSAGE);
             return;
         }
-
+        showBanner("▶ BFS → Union-Find → DFS → Bellman-Ford");
         selectedNode = null;
         detailPanel.showEmpty();
         faultPending = true;
@@ -245,24 +298,18 @@ public class GridUI extends JFrame {
     private void dijkstraAction() {
         java.util.List<Node> nodes = new java.util.ArrayList<>(engine.getGraph().getNodes());
         nodes.sort((a, b) -> Integer.compare(a.id, b.id));
-
         String[] names = nodes.stream()
                 .map(n -> n.label + " [" + n.type.name().charAt(0) + "]")
                 .toArray(String[]::new);
 
-        // Source picker
-        String srcChoice = (String) JOptionPane.showInputDialog(
-                this, "Select SOURCE node:", "Dijkstra — Source",
-                JOptionPane.PLAIN_MESSAGE, null, names, names[0]);
+        String srcChoice = (String) JOptionPane.showInputDialog(this, "Select SOURCE node:",
+                "Dijkstra — Source", JOptionPane.PLAIN_MESSAGE, null, names, names[0]);
         if (srcChoice == null) return;
 
-        // Destination picker — exclude the source
         String[] dstNames = java.util.Arrays.stream(names)
-                .filter(n -> !n.equals(srcChoice))
-                .toArray(String[]::new);
-        String dstChoice = (String) JOptionPane.showInputDialog(
-                this, "Select DESTINATION node:", "Dijkstra — Destination",
-                JOptionPane.PLAIN_MESSAGE, null, dstNames, dstNames[0]);
+                .filter(n -> !n.equals(srcChoice)).toArray(String[]::new);
+        String dstChoice = (String) JOptionPane.showInputDialog(this, "Select DESTINATION node:",
+                "Dijkstra — Destination", JOptionPane.PLAIN_MESSAGE, null, dstNames, dstNames[0]);
         if (dstChoice == null) return;
 
         int srcIdx = java.util.Arrays.asList(names).indexOf(srcChoice);
@@ -270,28 +317,13 @@ public class GridUI extends JFrame {
         Node src = nodes.get(srcIdx);
         Node dst = nodes.get(dstIdx);
 
-        java.util.List<Node> path = engine.runDijkstra(src.id, dst.id);
+        String zoneName = dst.zoneClass != null ? dst.zoneClass.displayName : "Global";
+        showBanner("▶ Running: Dijkstra [" + zoneName + " priority]");
+        engine.runDijkstra(src.id, dst.id);
         refresh();
 
-        if (path.isEmpty()) {
-            statsBar.setText(String.format(
-                " <html><font color='#ff6666'>No path found: %s → %s</font></html>",
-                src.label, dst.label));
-            JOptionPane.showMessageDialog(this,
-                "No path found between " + src.label + " and " + dst.label + ".\n"
-                + "(Node may be isolated or unreachable.)",
-                "Dijkstra Result", JOptionPane.WARNING_MESSAGE);
-        } else {
-            StringBuilder sb = new StringBuilder();
-            for (int i = 0; i < path.size(); i++) {
-                sb.append(path.get(i).label);
-                if (i < path.size() - 1) sb.append(" → ");
-            }
-            double cost = engine.getDijkstraPathCost();
-            statsBar.setText(String.format(
-                "<html> <font color='#66aaff'>Dijkstra %s → %s</font>"
-                + " &nbsp; Path: %s &nbsp; Cost: %.2f</html>",
-                src.label, dst.label, sb, cost));
+        if (engine.getDijkstraPath().isEmpty()) {
+            statsBar.setText("<html><font color='#ff6666'>No path: " + src.label + " → " + dst.label + "</font></html>");
         }
     }
 
@@ -300,7 +332,10 @@ public class GridUI extends JFrame {
     // -------------------------------------------------------------------------
 
     private void runPrediction() {
+        showBanner("▶ Running: Sliding Window + Max-Heap predictor");
+        engine.getPredictionEngine().refreshRiskScores();
         int nodeId = engine.predictNextFailureNode();
+        refreshPredictionWidget();
         if (nodeId == -1) {
             JOptionPane.showMessageDialog(this,
                 "No failure history yet.\nRun a fault first to build prediction data.",
@@ -309,8 +344,10 @@ public class GridUI extends JFrame {
             Node n = engine.getGraph().getNode(nodeId);
             String name = n != null ? n.label : "Node #" + nodeId;
             double risk = engine.getPredictionEngine().getRiskScore(nodeId);
+            int windowSize = engine.getPredictionEngine().getWindowSize();
             JOptionPane.showMessageDialog(this,
-                String.format("Predicted next failure:\n  Node: %s\n  Risk score: %.4f", name, risk),
+                String.format("⚠ Next Predicted Failure\n  Node: %s\n  Risk score: %.1f%%\n  Window: %d events",
+                    name, risk * 100, windowSize),
                 "Prediction Result", JOptionPane.WARNING_MESSAGE);
         }
     }
@@ -321,51 +358,41 @@ public class GridUI extends JFrame {
 
     private void updateStatsBar() {
         SimStats s = engine.getStats();
-        List<Node> path = engine.getDijkstraPath();
-
-        // Fenwick prefix-sum: cumulative load across all zones
         List<Node> zones = engine.getZoneNodes();
-        int totalZones = zones.size();
-        int fenwickTotal = totalZones > 0 ? engine.queryFenwickPrefix(totalZones) : 0;
-        int maxLoadZoneIdx = engine.queryMaxLoadZone(); // 1-based
-        String maxZoneLabel = (maxLoadZoneIdx > 0 && maxLoadZoneIdx <= zones.size())
-                ? zones.get(maxLoadZoneIdx - 1).label : "—";
+        int fenwickTotal = zones.size() > 0 ? engine.queryFenwickPrefix(zones.size()) : 0;
+        int maxZoneIdx   = engine.queryMaxLoadZone();
+        String maxZone   = (maxZoneIdx > 0 && maxZoneIdx <= zones.size())
+                ? zones.get(maxZoneIdx - 1).label : "—";
 
         String pathInfo = "";
+        List<Node> path = engine.getDijkstraPath();
         if (!path.isEmpty()) {
-            StringBuilder sb = new StringBuilder("  Path: ");
+            StringBuilder sb = new StringBuilder(" Path: ");
             for (int i = 0; i < path.size(); i++) {
                 sb.append(path.get(i).label);
-                if (i < path.size() - 1) sb.append(" → ");
+                if (i < path.size() - 1) sb.append("→");
             }
-            // Show zone weights used if path ends at a zone
             Node dest = path.get(path.size() - 1);
-            if (dest.zoneClass != null) {
-                sb.append(" [").append(dest.zoneClass.displayName).append(" weights]");
-            }
-            sb.append(String.format("  cost=%.2f", engine.getDijkstraPathCost()));
+            if (dest.zoneClass != null) sb.append(" [").append(dest.zoneClass.displayName).append("]");
+            sb.append(String.format(" cost=%.2f", engine.getDijkstraPathCost()));
             pathInfo = sb.toString();
         }
 
-        String faultWarning = faultPending
-            ? " &nbsp;<font color='#ffaa00'>&#9888; Fault active — click Auto Reroute</font>"
-            : "";
+        String faultWarn = faultPending
+            ? " &nbsp;<font color='#ffaa00'>⚠ Fault — click Auto Reroute</font>" : "";
 
         statsBar.setText(String.format(
-            "<html> Energy: %d &nbsp; Cost: %d &nbsp;"
-            + "<font color='#aaddff'>Fenwick&#8721;: %d &nbsp; MaxLoad: %s</font> &nbsp;"
-            + "Loss: %.1f%% &nbsp;"
-            + "<font color='#66ff99'>CO&#8322;: %.3f kg</font>"
+            "<html>Energy:%d &nbsp;Cost:%d &nbsp;"
+            + "<font color='#aaddff'>BIT∑:%d MaxLoad:%s</font> &nbsp;"
+            + "Loss:%.1f%% &nbsp;"
+            + "<font color='#66ff99'>CO₂:%.3fkg</font>"
             + "%s%s%s</html>",
             s.totalEnergyRouted, s.totalCost,
-            fenwickTotal, maxZoneLabel,
-            s.flowLossPercent,
-            s.totalCarbonKg,
+            fenwickTotal, maxZone,
+            s.flowLossPercent, s.totalCarbonKg,
             s.carbonIncreasePct != 0.0
-                ? String.format(" &nbsp;<font color='#ff6666'>&#8679;CO&#8322; +%.1f%%</font>",
-                                s.carbonIncreasePct)
-                : "",
-            faultWarning,
+                ? String.format(" &nbsp;<font color='#ff6666'>↑CO₂+%.1f%%</font>", s.carbonIncreasePct) : "",
+            faultWarn,
             pathInfo.isEmpty() ? "" : " &nbsp;<font color='#88ccff'>" + pathInfo + "</font>"
         ));
     }
@@ -373,7 +400,317 @@ public class GridUI extends JFrame {
     private void refresh() {
         updateStatsBar();
         refreshFenwickPanel();
+        refreshSegTreePanel();
+        refreshPredictionWidget();
+        refreshCO2Panel();
+        refreshDSALog();
+        refreshPathBreakdown();
         canvas.repaint();
+    }
+
+    // -------------------------------------------------------------------------
+    // Bottom panel: DSA log + path breakdown
+    // -------------------------------------------------------------------------
+
+    private JPanel buildBottomPanel() {
+        JPanel p = new JPanel(new BorderLayout(6, 0));
+        p.setBackground(new Color(12, 12, 24));
+        p.setBorder(BorderFactory.createEmptyBorder(4, 6, 4, 6));
+        p.setPreferredSize(new Dimension(0, 130));
+
+        // DSA log
+        dsaLogArea.setEditable(false);
+        dsaLogArea.setBackground(new Color(8, 18, 30));
+        dsaLogArea.setForeground(new Color(100, 220, 100));
+        dsaLogArea.setFont(new Font("Monospaced", Font.PLAIN, 10));
+        dsaLogArea.setBorder(BorderFactory.createTitledBorder(
+            BorderFactory.createLineBorder(new Color(30, 80, 30)),
+            "Algorithm Activity", 0, 0,
+            new Font("SansSerif", Font.BOLD, 10), new Color(80, 200, 80)));
+        JScrollPane logScroll = new JScrollPane(dsaLogArea);
+        logScroll.setPreferredSize(new Dimension(400, 0));
+
+        // Path breakdown
+        pathBreakdownArea.setEditable(false);
+        pathBreakdownArea.setBackground(new Color(8, 18, 30));
+        pathBreakdownArea.setForeground(new Color(180, 200, 255));
+        pathBreakdownArea.setFont(new Font("Monospaced", Font.PLAIN, 10));
+        pathBreakdownArea.setBorder(BorderFactory.createTitledBorder(
+            BorderFactory.createLineBorder(new Color(40, 60, 120)),
+            "Path Cost Breakdown", 0, 0,
+            new Font("SansSerif", Font.BOLD, 10), new Color(100, 140, 255)));
+        JScrollPane bdScroll = new JScrollPane(pathBreakdownArea);
+
+        p.add(logScroll, BorderLayout.WEST);
+        p.add(bdScroll,  BorderLayout.CENTER);
+        return p;
+    }
+
+    private void refreshDSALog() {
+        java.util.Deque<String> log = engine.getDSALog();
+        StringBuilder sb = new StringBuilder();
+        for (String line : log) sb.append(line).append("\n");
+        dsaLogArea.setText(sb.toString());
+        dsaLogArea.setCaretPosition(dsaLogArea.getDocument().getLength());
+    }
+
+    private void refreshPathBreakdown() {
+        PathCostBreakdown bd = engine.getPathCostBreakdown();
+        if (bd.hops.isEmpty()) { pathBreakdownArea.setText("No path selected."); return; }
+        StringBuilder sb = new StringBuilder();
+        sb.append("Zone: ").append(bd.zoneWeightsUsed).append("\n");
+        sb.append("Path: ").append(bd.pathString).append("\n");
+        sb.append(String.format("%-14s %6s %6s %6s %6s %7s\n",
+            "Hop", "Base", "CO₂", "Risk", "Lat", "Total"));
+        sb.append("─".repeat(50)).append("\n");
+        for (PathCostBreakdown.HopCost h : bd.hops) {
+            sb.append(String.format("%-14s %6.2f %6.3f %6.3f %6.2f %7.3f\n",
+                h.fromLabel + "→" + h.toLabel,
+                h.baseCost, h.carbonCost, h.failureRisk, h.latency, h.effectiveCost));
+        }
+        sb.append("─".repeat(50)).append("\n");
+        sb.append(String.format("%-14s %6.2f %6.3f %6.3f %6.2f %7.3f\n",
+            "TOTAL",
+            bd.totalBaseCost, bd.totalCarbonCost,
+            bd.totalFailureRisk, bd.totalLatency, bd.totalEffectiveCost));
+        pathBreakdownArea.setText(sb.toString());
+    }
+
+    // -------------------------------------------------------------------------
+    // Prediction widget
+    // -------------------------------------------------------------------------
+
+    private JPanel buildPredictionWidget() {
+        JPanel p = new JPanel();
+        p.setLayout(new BoxLayout(p, BoxLayout.Y_AXIS));
+        p.setBackground(new Color(20, 15, 35));
+        p.setBorder(BorderFactory.createCompoundBorder(
+            BorderFactory.createLineBorder(new Color(100, 50, 150)),
+            BorderFactory.createEmptyBorder(5, 6, 5, 6)));
+        p.setMaximumSize(new Dimension(Integer.MAX_VALUE, 100));
+
+        JLabel title = new JLabel("⚠ Next Predicted Failure");
+        title.setForeground(new Color(220, 150, 255));
+        title.setFont(new Font("SansSerif", Font.BOLD, 10));
+        p.add(title); p.add(vgap(3));
+
+        predBar.setForeground(new Color(220, 60, 60));
+        predBar.setBackground(new Color(40, 20, 40));
+        predBar.setMaximumSize(new Dimension(Integer.MAX_VALUE, 10));
+        predBar.setStringPainted(false);
+
+        p.add(predRow("Node:", predNodeLabel));
+        p.add(predRow("Risk:", predRiskLabel));
+        p.add(predBar);
+        p.add(predRow("History:", predHistLabel));
+        return p;
+    }
+
+    private JPanel predRow(String key, JLabel val) {
+        JPanel r = new JPanel(new BorderLayout(4, 0));
+        r.setBackground(new Color(20, 15, 35));
+        r.setMaximumSize(new Dimension(Integer.MAX_VALUE, 18));
+        JLabel k = new JLabel(key);
+        k.setForeground(new Color(160, 120, 200));
+        k.setFont(new Font("SansSerif", Font.PLAIN, 10));
+        val.setForeground(new Color(220, 200, 255));
+        val.setFont(new Font("SansSerif", Font.BOLD, 10));
+        r.add(k, BorderLayout.WEST); r.add(val, BorderLayout.EAST);
+        return r;
+    }
+
+    private void refreshPredictionWidget() {
+        int nodeId = engine.predictNextFailureNode();
+        if (nodeId == -1) {
+            predNodeLabel.setText("—"); predRiskLabel.setText("—");
+            predHistLabel.setText("0 events"); predBar.setValue(0);
+        } else {
+            Node n = engine.getGraph().getNode(nodeId);
+            String name = n != null ? n.label : "#" + nodeId;
+            double risk = engine.getPredictionEngine().getRiskScore(nodeId);
+            int pct = (int) Math.min(100, risk * 200);
+            predNodeLabel.setText(name);
+            predRiskLabel.setText(String.format("%.0f%%  ", risk * 100));
+            predHistLabel.setText(engine.getPredictionEngine().getWindowSize() + " events");
+            predBar.setValue(pct);
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // Segment Tree panel
+    // -------------------------------------------------------------------------
+
+    private JPanel buildSegTreePanel() {
+        JPanel p = new JPanel();
+        p.setLayout(new BoxLayout(p, BoxLayout.Y_AXIS));
+        p.setBackground(new Color(15, 25, 20));
+        p.setBorder(BorderFactory.createCompoundBorder(
+            BorderFactory.createLineBorder(new Color(30, 100, 60)),
+            BorderFactory.createEmptyBorder(5, 6, 5, 6)));
+        p.setMaximumSize(new Dimension(Integer.MAX_VALUE, 120));
+
+        JLabel title = new JLabel("Segment Tree — Zone Loads");
+        title.setForeground(new Color(80, 220, 120));
+        title.setFont(new Font("SansSerif", Font.BOLD, 10));
+        p.add(title); p.add(vgap(3));
+
+        List<Node> zones = engine.getZoneNodes();
+        for (int i = 0; i < 5; i++) {
+            String lbl = i < zones.size() ? zones.get(i).label : "Z" + (i+1);
+            segTreeLabels[i] = new JLabel(lbl + ": 0 MW");
+            segTreeLabels[i].setForeground(new Color(140, 220, 160));
+            segTreeLabels[i].setFont(new Font("Monospaced", Font.PLAIN, 9));
+            p.add(segTreeLabels[i]);
+        }
+        p.add(vgap(2));
+        segTreeMaxLabel.setForeground(new Color(255, 200, 80));
+        segTreeMaxLabel.setFont(new Font("Monospaced", Font.PLAIN, 9));
+        segTreeSumLabel.setForeground(new Color(100, 200, 255));
+        segTreeSumLabel.setFont(new Font("Monospaced", Font.PLAIN, 9));
+        segTreeMinLabel.setForeground(new Color(180, 255, 180));
+        segTreeMinLabel.setFont(new Font("Monospaced", Font.PLAIN, 9));
+        p.add(segTreeMaxLabel);
+        p.add(segTreeSumLabel);
+        p.add(segTreeMinLabel);
+        return p;
+    }
+
+    private void refreshSegTreePanel() {
+        List<Node> zones = engine.getZoneNodes();
+        for (int i = 0; i < segTreeLabels.length; i++) {
+            if (segTreeLabels[i] == null) continue;
+            int load = i < zones.size() ? zones.get(i).currentLoad : 0;
+            String lbl = i < zones.size() ? zones.get(i).label : "Z" + (i+1);
+            segTreeLabels[i].setText(lbl + ": " + load + " MW");
+        }
+        int maxIdx = engine.queryMaxLoadZone();
+        int sumAll = engine.queryEnergyRange(1, 5);
+        int minLoad = engine.queryMaxLoad(2, 4); // range min via max query on inverted — use sum/3 approx
+        String maxLabel = maxIdx > 0 && maxIdx <= zones.size() ? zones.get(maxIdx-1).label : "—";
+        segTreeMaxLabel.setText("Max[1-5]: " + maxLabel + " (" + engine.queryMaxLoad(maxIdx, maxIdx) + " MW)");
+        segTreeSumLabel.setText("Sum[1-5]: " + sumAll + " MW");
+        segTreeMinLabel.setText("Max[2-4]: " + minLoad + " MW");
+    }
+
+    // -------------------------------------------------------------------------
+    // CO₂ dashboard
+    // -------------------------------------------------------------------------
+
+    private JPanel buildCO2Panel() {
+        JPanel p = new JPanel();
+        p.setLayout(new BoxLayout(p, BoxLayout.Y_AXIS));
+        p.setBackground(new Color(15, 25, 15));
+        p.setBorder(BorderFactory.createCompoundBorder(
+            BorderFactory.createLineBorder(new Color(30, 100, 30)),
+            BorderFactory.createEmptyBorder(5, 6, 5, 6)));
+        p.setMaximumSize(new Dimension(Integer.MAX_VALUE, 80));
+
+        JLabel title = new JLabel("CO₂ Dashboard (GreenTech)");
+        title.setForeground(new Color(80, 220, 80));
+        title.setFont(new Font("SansSerif", Font.BOLD, 10));
+        p.add(title); p.add(vgap(3));
+
+        co2RenewLabel.setForeground(new Color(100, 255, 100));
+        co2RenewLabel.setFont(new Font("Monospaced", Font.PLAIN, 9));
+        co2TotalLabel.setForeground(new Color(200, 255, 150));
+        co2TotalLabel.setFont(new Font("Monospaced", Font.PLAIN, 9));
+        co2SavedLabel.setForeground(new Color(150, 255, 200));
+        co2SavedLabel.setFont(new Font("Monospaced", Font.BOLD, 9));
+        p.add(co2RenewLabel);
+        p.add(co2TotalLabel);
+        p.add(co2SavedLabel);
+        return p;
+    }
+
+    private void refreshCO2Panel() {
+        SimStats s = engine.getStats();
+        co2RenewLabel.setText(String.format("Renewable: %.0f%%", s.renewableFraction * 100));
+        co2TotalLabel.setText(String.format("CO₂ session: %.2f kg", s.sessionCarbonKg));
+        co2SavedLabel.setText(String.format("Saved vs coal: %.2f kg  ← BIT", s.co2SavedKg));
+    }
+
+    // -------------------------------------------------------------------------
+    // Banner
+    // -------------------------------------------------------------------------
+
+    /** Shows a 2-second algorithm banner in the top-right. */
+    public void showBanner(String text) {
+        bannerLabel.setText("  " + text + "  ");
+        if (bannerTimer != null) bannerTimer.stop();
+        bannerTimer = new javax.swing.Timer(2000, e -> bannerLabel.setText(" "));
+        bannerTimer.setRepeats(false);
+        bannerTimer.start();
+    }
+
+    // -------------------------------------------------------------------------
+    // Demo Mode
+    // -------------------------------------------------------------------------
+
+    private void runDemoMode() {
+        javax.swing.Timer t = new javax.swing.Timer(0, null);
+        final int[] step = {0};
+        t.addActionListener(e -> {
+            switch (step[0]++) {
+                case 0:
+                    showBanner("▶ SPFA Min-Cost Max-Flow");
+                    engine.runNormalDistribution(); refresh(); break;
+                case 1: break; // pause
+                case 2:
+                    // Click Hospital zone
+                    Node hospital = null;
+                    for (Node n : engine.getGraph().getNodes())
+                        if (n.zoneClass == ZoneClassification.HOSPITAL) { hospital = n; break; }
+                    if (hospital != null) {
+                        showBanner("▶ Dijkstra [Hospital priority] + Pareto paths");
+                        engine.runDijkstraSmartClick(hospital.id);
+                        detailPanel.showNode(hospital);
+                        refresh();
+                    }
+                    break;
+                case 3: break;
+                case 4:
+                    // Inject fault on Sub-B (id=5)
+                    showBanner("▶ BFS → Union-Find → DFS → Bellman-Ford");
+                    engine.injectFault(5); faultPending = true; refresh(); break;
+                case 5: break;
+                case 6:
+                    showBanner("▶ SPFA rerouting");
+                    engine.autoReroute(); faultPending = false; refresh(); break;
+                case 7: break;
+                case 8:
+                    showBanner("▶ Sliding Window + Max-Heap predictor");
+                    runPrediction(); refresh(); break;
+                case 9: break;
+                case 10:
+                    showBanner("▶ Adaptive Mode — edge costs self-adjusting");
+                    engine.setAdaptiveMode(true); btnAdaptive.setSelected(true);
+                    btnAdaptive.setText("Adaptive: ON");
+                    engine.runNormalDistribution(); refresh(); break;
+                case 11:
+                    engine.runNormalDistribution(); refresh(); break;
+                case 12: break;
+                case 13:
+                    // Trigger load shedding manually
+                    showBanner("▶ Bellman-Ford → Topological Sort load shedding");
+                    Node src = null;
+                    for (Node n : engine.getGraph().getNodes())
+                        if (n.type == NodeType.ENERGY_SOURCE && n.status == NodeStatus.ACTIVE) { src = n; break; }
+                    if (src != null) {
+                        BellmanFordAlgorithm.Result bf = engine.runBellmanFord(src.id);
+                        engine.runTopologicalSort();
+                        refresh();
+                    }
+                    break;
+                case 14: break;
+                default:
+                    t.stop();
+                    showBanner("✓ Demo complete");
+                    break;
+            }
+        });
+        t.setDelay(3000);
+        t.setInitialDelay(0);
+        t.start();
     }
 
     // -------------------------------------------------------------------------

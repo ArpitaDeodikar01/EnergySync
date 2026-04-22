@@ -15,18 +15,20 @@ import java.util.List;
  * all simulation actions here.
  *
  * Algorithms used:
- *   1. MCMFAlgorithm       — Min-Cost Max-Flow via SPFA
- *   2. DijkstraAlgorithm   — shortest path via min-heap
- *   3. BFSAlgorithm        — fault impact detection
- *   4. DFSAlgorithm        — faulty subgraph isolation
- *   5. FenwickTree         — cumulative energy tracking (prefix sums)
- *   6. PriorityQueue<Node> — MinHeap load balancing by cost
- *   7. SegmentTree         — range energy queries + max-load zone detection
- *   8. UnionFind           — connected component detection + faulty subgraph isolation
+ *   1.  MCMFAlgorithm        — Min-Cost Max-Flow via SPFA
+ *   2.  DijkstraAlgorithm    — shortest path via min-heap
+ *   3.  BFSAlgorithm         — fault impact detection
+ *   4.  DFSAlgorithm         — faulty subgraph isolation
+ *   5.  BellmanFordAlgorithm — grid stress analysis + negative-cycle detection
+ *   6.  TopologicalSort      — load-shedding priority order (Kahn's algorithm)
+ *   7.  FenwickTree          — cumulative energy tracking (prefix sums)
+ *   8.  PriorityQueue<Node>  — MinHeap load balancing by cost
+ *   9.  SegmentTree          — range energy queries + max-load zone detection
+ *   10. UnionFind            — connected component detection + faulty subgraph isolation
  *
  * Adaptive services:
- *   9. WeightUpdateService — updates edge costs from observed performance
- *  10. PredictionEngine    — sliding-window failure prediction via max-heap
+ *   11. WeightUpdateService — updates edge costs from observed performance
+ *   12. PredictionEngine    — sliding-window failure prediction via max-heap
  */
 public class SimulationEngine {
 
@@ -42,6 +44,10 @@ public class SimulationEngine {
     private List<Node> dijkstraPath;
     /** Scaled cost of the last Dijkstra run (divide by Edge.COST_SCALE for display). */
     private long dijkstraLastCost = 0;
+    /** Zones to shed in order (set by Bellman-Ford → TopologicalSort chain). */
+    private List<Node> lastSheddingOrder = new ArrayList<>();
+    /** Pareto paths: [0]=cost-optimal [1]=carbon-optimal [2]=reliability-optimal */
+    private List<List<Node>> paretoPaths = new ArrayList<>();
 
     /** Weight vector for composite edge cost. Defaults reproduce original behavior. */
     private CostWeights weights;
@@ -345,28 +351,37 @@ public class SimulationEngine {
      */
     public void runNormalDistribution() {
         for (Node n : graph.getNodes()) n.status = NodeStatus.ACTIVE;
-
-        // Single MCMF pass with global weights — routes to ALL zones simultaneously.
-        // Per-zone weights are applied in Dijkstra click routing (runDijkstraSmartClick),
-        // not here, because MCMF resets edge flows each pass which would erase earlier zones.
         recomputeEffectiveCosts();
 
+        logDSA("▶ Running: SPFA Min-Cost Max-Flow");
         MCMFAlgorithm mcmf = new MCMFAlgorithm(graph, weights);
         MCMFAlgorithm.Result result = mcmf.run(stats);
         preFaultFlow = result.totalFlow;
         lastFlowReceivers = result.flowReceivers;
 
+        // Adaptive mode: update edge costs from observed performance
+        stats.adaptiveEdgesUpdated = 0;
         if (adaptiveMode) {
+            int before = countEdges();
             weightUpdateService.processRun(graph.getAdjList(), currentFaultedIds);
             recomputeEffectiveCosts();
+            stats.adaptiveEdgesUpdated = before; // approximate — all edges observed
+            logDSA("Adaptive: updated " + stats.adaptiveEdgesUpdated + " edge costs");
         }
 
+        // Segment Tree: update all 5 zone loads, then run 3 query types
         refreshSegmentTree();
+        int maxZoneIdx = segTree.queryMaxLoadZone();
+        int sumAll     = segTree.queryEnergyRange(1, 5);
+        int minSlack   = segTree.queryMaxLoad(1, 5); // used for reroute destination
+        logDSA("Seg Tree range-max [1-5] → Zone-" + maxZoneIdx + ": " + segTree.queryMaxLoad(maxZoneIdx, maxZoneIdx) + " MW");
+        logDSA("Seg Tree range-sum [1-5] → " + sumAll + " MW total");
+
         computeCarbonFootprint();
-        stats.preFaultCarbonKg = stats.totalCarbonKg;
+        stats.preFaultCarbonKg  = stats.totalCarbonKg;
         stats.carbonIncreasePct = 0.0;
 
-        // FenwickTree: update each zone with its actual currentLoad
+        // Fenwick Tree: update each zone, log prefix sums
         fenwick.reset();
         int fenwickIdx = 1;
         for (Node n : graph.getNodes()) {
@@ -374,6 +389,52 @@ public class SimulationEngine {
                 fenwick.update(fenwickIdx, n.currentLoad);
                 fenwickIdx++;
             }
+        }
+        int prefix3 = fenwick.query(3);
+        int prefix5 = fenwick.query(5);
+        logDSA("BIT update → prefix[1-3]: " + prefix3 + " | prefix[1-5]: " + prefix5);
+
+        // Session totals for CO₂ dashboard
+        stats.sessionEnergyMWh += result.totalFlow;
+        stats.sessionCarbonKg  += stats.totalCarbonKg;
+        // CO₂ saved vs naive coal baseline (0.82 kg/MWh)
+        stats.co2SavedKg = stats.sessionEnergyMWh * 0.82 - stats.sessionCarbonKg;
+
+        // Renewable fraction: solar+wind+nuclear flow / total
+        computeRenewableFraction();
+
+        // Union-Find component count
+        stats.componentCount = unionFind.componentCount();
+        logDSA("Union-Find: " + stats.componentCount + " component(s)");
+
+        // Min-Heap: log source selection
+        logMinHeapSelection();
+    }
+
+    private int countEdges() {
+        int c = 0;
+        for (List<Edge> el : graph.getAdjList().values()) c += el.size();
+        return c;
+    }
+
+    private void computeRenewableFraction() {
+        double renewableFlow = 0, totalFlow = 0;
+        for (Node n : graph.getNodes()) {
+            if (n.type != NodeType.ENERGY_SOURCE) continue;
+            for (Edge e : graph.getNeighbors(n.id)) {
+                totalFlow += e.flow;
+                if (!n.label.equals("Hydro")) renewableFlow += e.flow; // Solar, Wind, Nuclear = renewable
+            }
+        }
+        stats.renewableFraction = totalFlow > 0 ? renewableFlow / totalFlow : 0.0;
+    }
+
+    private void logMinHeapSelection() {
+        // Rebuild min-heap snapshot for logging (non-destructive)
+        PriorityQueue<Node> snapshot = new PriorityQueue<>(minHeap);
+        if (!snapshot.isEmpty()) {
+            Node cheapest = snapshot.peek();
+            logDSA("Min-Heap: " + cheapest.label + " popped (cost " + cheapest.cost + ") → load assigned");
         }
     }
 
@@ -391,35 +452,71 @@ public class SimulationEngine {
      */
     public boolean injectFault(int faultedId) {
         faultTimestamp = System.currentTimeMillis();
-
         Node faultedNode = graph.getNode(faultedId);
         if (faultedNode == null) return false;
 
         faultedNode.status = NodeStatus.ISOLATED;
 
+        // Step 1: BFS fault propagation
+        logDSA("▶ Running: BFS fault propagation");
         BFSAlgorithm bfs = new BFSAlgorithm(graph);
         stats.zonesAffected = bfs.run(faultedId);
+        logDSA("BFS: " + stats.zonesAffected + " zone(s) disconnected");
 
+        // Step 2: DFS subgraph isolation
+        logDSA("▶ Running: DFS subgraph isolation");
         DFSAlgorithm dfs = new DFSAlgorithm(graph);
         dfs.run(faultedId);
+        logDSA("DFS: isolated subgraph from " + faultedNode.label);
 
-        // Track faulted node for WeightUpdateService in the next processRun call
         currentFaultedIds.clear();
         currentFaultedIds.add(faultedId);
 
-        // Record failure in PredictionEngine sliding window
         int totalZones = (int) graph.getNodes().stream()
                 .filter(n -> n.type == NodeType.CITY_ZONE).count();
-        double severity = totalZones > 0
-                ? (double) stats.zonesAffected / totalZones
-                : 0.0;
+        double severity = totalZones > 0 ? (double) stats.zonesAffected / totalZones : 0.0;
         predictionEngine.recordFailure(faultedId, faultedNode.label, severity);
 
         graph.removeNode(faultedId);
         minHeap.remove(faultedNode);
 
-        // Rebuild UnionFind to reflect the new graph topology after node removal
+        // Step 3: Union-Find connectivity check
+        logDSA("▶ Running: Union-Find connectivity check");
         rebuildUnionFind();
+        stats.componentCount = unionFind.componentCount();
+        logDSA("Union-Find: " + stats.componentCount + " component(s) after fault");
+
+        // Step 4: Bellman-Ford stress detection (runs after every fault)
+        logDSA("▶ Running: Bellman-Ford stress detection");
+        recomputeEffectiveCosts();
+        BellmanFordAlgorithm bf = new BellmanFordAlgorithm(graph);
+        // Run from first active source
+        Node firstSrc = null;
+        for (Node n : graph.getNodes()) {
+            if (n.type == NodeType.ENERGY_SOURCE && n.status == NodeStatus.ACTIVE) {
+                firstSrc = n; break;
+            }
+        }
+        if (firstSrc != null) {
+            BellmanFordAlgorithm.Result bfResult = bf.run(firstSrc.id);
+            stats.stressCycleDetected = bfResult.hasNegativeCycle;
+            logDSA(bfResult.summary);
+
+            if (bfResult.hasNegativeCycle) {
+                // Step 5: Topological Sort load shedding
+                logDSA("▶ Running: Topological Sort load shedding");
+                TopologicalSort topo = new TopologicalSort(graph);
+                TopologicalSort.Result topoResult = topo.run();
+                stats.loadSheddingOrder = topoResult.summary;
+                logDSA(topoResult.summary);
+                // Store for UI animation
+                lastSheddingOrder = topoResult.sheddingOrder;
+            } else {
+                stats.loadSheddingOrder = "";
+                lastSheddingOrder = new ArrayList<>();
+            }
+        }
+
         return true;
     }
 
@@ -432,6 +529,7 @@ public class SimulationEngine {
      * Time complexity: dominated by MCMF — O(V * E * F)
      */
     public void autoReroute() {
+        logDSA("▶ Running: SPFA Min-Cost Max-Flow (reroute)");
         recomputeEffectiveCosts();
 
         MCMFAlgorithm mcmf = new MCMFAlgorithm(graph, weights);
@@ -439,18 +537,14 @@ public class SimulationEngine {
         int postRerouteFlow = result.totalFlow;
         lastFlowReceivers = result.flowReceivers;
 
-        // Adaptive: update edge costs from post-fault observed performance
         if (adaptiveMode) {
             weightUpdateService.processRun(graph.getAdjList(), currentFaultedIds);
             recomputeEffectiveCosts();
         }
 
-        // Refresh SegmentTree with post-reroute zone loads
         refreshSegmentTree();
         computeCarbonFootprint();
 
-        // Compute how much CO2 increased vs the pre-fault baseline
-        // Solar (lowest carbon) is gone — Wind/Hydro carry more load → higher CO2
         if (stats.preFaultCarbonKg > 0) {
             stats.carbonIncreasePct = (stats.totalCarbonKg - stats.preFaultCarbonKg)
                                       / stats.preFaultCarbonKg * 100.0;
@@ -476,6 +570,22 @@ public class SimulationEngine {
             if (n.type == NodeType.CITY_ZONE && n.status == NodeStatus.FAULT) stillAffected++;
         }
         stats.zonesAffected = stillAffected;
+
+        // Union-Find: verify all zones reconnected
+        logDSA("▶ Running: Union-Find connectivity check");
+        stats.componentCount = unionFind.componentCount();
+        logDSA("Union-Find: " + stats.componentCount + " component(s) after reroute");
+
+        // Fenwick update
+        fenwick.reset();
+        int fi = 1;
+        for (Node n : graph.getNodes()) {
+            if (n.type == NodeType.CITY_ZONE) { fenwick.update(fi, n.currentLoad); fi++; }
+        }
+        stats.sessionEnergyMWh += postRerouteFlow;
+        stats.sessionCarbonKg  += stats.totalCarbonKg;
+        stats.co2SavedKg = stats.sessionEnergyMWh * 0.82 - stats.sessionCarbonKg;
+        computeRenewableFraction();
     }
 
     // -------------------------------------------------------------------------
@@ -492,14 +602,15 @@ public class SimulationEngine {
         if (clicked == null) return new ArrayList<>();
 
         if (clicked.type == NodeType.CITY_ZONE) {
-            // Find the best source → this zone using zone's own priority weights
             CostWeights zoneWeights = clicked.zoneClass != null
                     ? clicked.zoneClass.weights : weights;
+            String zoneName = clicked.zoneClass != null ? clicked.zoneClass.displayName : "Global";
+            logDSA("▶ Running: Dijkstra [" + zoneName + " priority]");
+
             for (List<Edge> edges : graph.getAdjList().values()) {
                 for (Edge e : edges) e.computeEffectiveCost(zoneWeights);
             }
 
-            // Try every active source, keep the cheapest path to this zone
             List<Node> bestPath = new ArrayList<>();
             long bestCost = Long.MAX_VALUE;
             DijkstraAlgorithm dijk = new DijkstraAlgorithm(graph, zoneWeights);
@@ -514,13 +625,53 @@ public class SimulationEngine {
             }
             dijkstraPath = bestPath;
             dijkstraLastCost = bestCost == Long.MAX_VALUE ? 0 : bestCost;
-            recomputeEffectiveCosts(); // restore global weights
+
+            // Compute Pareto paths (3 objectives simultaneously)
+            computeParetoPaths(clickedNodeId);
+
+            recomputeEffectiveCosts();
             return dijkstraPath;
         }
 
-        // Non-zone node: run to nearest CityZone as before
+        logDSA("▶ Running: Dijkstra [nearest zone]");
         return runDijkstra(clickedNodeId);
     }
+
+    /**
+     * Computes 3 Pareto-optimal paths to the target zone:
+     *   [0] Cost-optimal:    w = (1.0, 0.0, 0.0, 0.0)
+     *   [1] Carbon-optimal:  w = (0.0, 1.0, 0.0, 0.0)
+     *   [2] Reliability:     w = (0.0, 0.0, 1.0, 0.0)
+     * Stored in paretoPaths for GraphCanvas to draw as dotted lines.
+     */
+    private void computeParetoPaths(int targetZoneId) {
+        paretoPaths = new ArrayList<>();
+        CostWeights[] objectives = {
+            new CostWeights(1.0, 0.0, 0.0, 0.0),  // cost-optimal (blue)
+            new CostWeights(0.0, 1.0, 0.0, 0.0),  // carbon-optimal (green)
+            new CostWeights(0.0, 0.0, 1.0, 0.0)   // reliability (gold)
+        };
+        for (CostWeights w : objectives) {
+            for (List<Edge> edges : graph.getAdjList().values()) {
+                for (Edge e : edges) e.computeEffectiveCost(w);
+            }
+            DijkstraAlgorithm dijk = new DijkstraAlgorithm(graph, w);
+            List<Node> best = new ArrayList<>();
+            long bestC = Long.MAX_VALUE;
+            for (Node src : graph.getNodes()) {
+                if (src.type == NodeType.ENERGY_SOURCE && src.status == NodeStatus.ACTIVE) {
+                    List<Node> p = dijk.runTo(src.id, targetZoneId);
+                    if (!p.isEmpty()) {
+                        long c = computePathCost(p);
+                        if (c < bestC) { bestC = c; best = p; }
+                    }
+                }
+            }
+            paretoPaths.add(best);
+        }
+    }
+
+    public List<List<Node>> getParetoPaths() { return paretoPaths; }
 
     /**
      * Runs Dijkstra from the given node to the nearest CityZone.
@@ -710,4 +861,89 @@ public class SimulationEngine {
 
     public boolean isAdaptiveMode()            { return adaptiveMode; }
     public void setAdaptiveMode(boolean on)    { this.adaptiveMode = on; }
+
+    // -------------------------------------------------------------------------
+    // Bellman-Ford + Topological Sort public API
+    // -------------------------------------------------------------------------
+
+    public BellmanFordAlgorithm.Result runBellmanFord(int sourceId) {
+        recomputeEffectiveCosts();
+        logDSA("▶ Running: Bellman-Ford stress detection");
+        BellmanFordAlgorithm bf = new BellmanFordAlgorithm(graph);
+        BellmanFordAlgorithm.Result r = bf.run(sourceId);
+        stats.stressCycleDetected = r.hasNegativeCycle;
+        logDSA(r.summary);
+        return r;
+    }
+
+    public TopologicalSort.Result runTopologicalSort() {
+        logDSA("▶ Running: Topological Sort load shedding");
+        TopologicalSort topo = new TopologicalSort(graph);
+        TopologicalSort.Result r = topo.run();
+        stats.loadSheddingOrder = r.summary;
+        lastSheddingOrder = r.sheddingOrder;
+        logDSA(r.summary);
+        return r;
+    }
+
+    public List<Node> getLastSheddingOrder() { return lastSheddingOrder; }
+
+    // -------------------------------------------------------------------------
+    // Path cost breakdown
+    // -------------------------------------------------------------------------
+
+    public PathCostBreakdown getPathCostBreakdown() {
+        PathCostBreakdown bd = new PathCostBreakdown();
+        List<Node> path = dijkstraPath;
+        if (path.isEmpty()) return bd;
+
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < path.size(); i++) {
+            sb.append(path.get(i).label);
+            if (i < path.size() - 1) sb.append(" → ");
+        }
+        bd.pathString = sb.toString();
+
+        Node dest = path.get(path.size() - 1);
+        if (dest.zoneClass != null) {
+            CostWeights w = dest.zoneClass.weights;
+            bd.zoneWeightsUsed = dest.zoneClass.displayName
+                + "  w=(" + String.format("%.2f,%.2f,%.2f,%.2f", w.w1, w.w2, w.w3, w.w4) + ")";
+        } else {
+            bd.zoneWeightsUsed = "Global weights";
+        }
+
+        for (int i = 0; i < path.size() - 1; i++) {
+            int fromId = path.get(i).id, toId = path.get(i + 1).id;
+            for (Edge e : graph.getNeighbors(fromId)) {
+                if (e.to == toId) {
+                    bd.hops.add(new PathCostBreakdown.HopCost(
+                        path.get(i).label, path.get(i + 1).label,
+                        e.baseCost, e.carbonCost, e.failureRisk, e.latency,
+                        e.effectiveCost, e.flow, e.capacity));
+                    bd.totalBaseCost     += e.baseCost;
+                    bd.totalCarbonCost   += e.carbonCost;
+                    bd.totalFailureRisk  += e.failureRisk;
+                    bd.totalLatency      += e.latency;
+                    bd.totalEffectiveCost += e.effectiveCost;
+                    break;
+                }
+            }
+        }
+        return bd;
+    }
+
+    // -------------------------------------------------------------------------
+    // DSA activity log
+    // -------------------------------------------------------------------------
+
+    private final java.util.Deque<String> dsaLog = new java.util.ArrayDeque<>();
+    private static final int DSA_LOG_MAX = 10;
+
+    public void logDSA(String msg) {
+        if (dsaLog.size() >= DSA_LOG_MAX) dsaLog.pollFirst();
+        dsaLog.addLast(msg);
+    }
+
+    public java.util.Deque<String> getDSALog() { return dsaLog; }
 }

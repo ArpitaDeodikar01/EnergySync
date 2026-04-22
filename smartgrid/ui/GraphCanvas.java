@@ -109,8 +109,70 @@ public class GraphCanvas extends JPanel {
 
         drawHeatmapBands(g2, graph);
         drawEdges(g2, graph, pathEdges);
+        drawParetoPaths(g2, graph);
         drawFlowAnimation(g2, graph);
         drawNodes(g2, graph, dijkPath);
+        drawSheddingOverlay(g2, graph);
+    }
+
+    // -------------------------------------------------------------------------
+    // Pareto paths (3 dotted lines: blue=cost, green=carbon, gold=reliability)
+    // -------------------------------------------------------------------------
+
+    private void drawParetoPaths(Graphics2D g2, Graph graph) {
+        java.util.List<java.util.List<Node>> pareto = engine.getParetoPaths();
+        if (pareto == null || pareto.isEmpty()) return;
+
+        Color[] colors = {
+            new Color(80, 140, 255, 160),   // blue  = cost-optimal
+            new Color(60, 220, 100, 160),   // green = carbon-optimal
+            new Color(255, 200, 40, 160)    // gold  = reliability
+        };
+        String[] labels = {"Cost-opt", "Carbon-opt", "Reliability"};
+        float[] dash = {6f, 4f};
+
+        for (int pi = 0; pi < Math.min(3, pareto.size()); pi++) {
+            java.util.List<Node> path = pareto.get(pi);
+            if (path.size() < 2) continue;
+            g2.setColor(colors[pi]);
+            g2.setStroke(new BasicStroke(2.5f, BasicStroke.CAP_ROUND, BasicStroke.JOIN_ROUND,
+                    1f, dash, 0f));
+            for (int i = 0; i < path.size() - 1; i++) {
+                Node a = path.get(i), b = path.get(i + 1);
+                if (a == null || b == null) continue;
+                int[] pts = edgeEndpoints(a, b);
+                g2.drawLine(pts[0], pts[1], pts[2], pts[3]);
+            }
+            // Label at midpoint of first edge
+            if (path.size() >= 2) {
+                Node a = path.get(0), b = path.get(1);
+                int mx = (a.x + b.x) / 2 - 10, my = (a.y + b.y) / 2 - 8 - pi * 12;
+                g2.setFont(new Font("SansSerif", Font.BOLD, 9));
+                g2.drawString(labels[pi], mx, my);
+            }
+        }
+        g2.setStroke(new BasicStroke(1.5f));
+    }
+
+    // -------------------------------------------------------------------------
+    // Load shedding overlay — dims zones in shedding order
+    // -------------------------------------------------------------------------
+
+    private void drawSheddingOverlay(Graphics2D g2, Graph graph) {
+        java.util.List<Node> shedOrder = engine.getLastSheddingOrder();
+        if (shedOrder == null || shedOrder.isEmpty()) return;
+        for (int i = 0; i < shedOrder.size(); i++) {
+            Node n = shedOrder.get(i);
+            if (n == null) continue;
+            // Draw numbered dim overlay
+            g2.setColor(new Color(200, 80, 20, 100));
+            g2.fillOval(n.x - NODE_RADIUS, n.y - NODE_RADIUS, NODE_RADIUS * 2, NODE_RADIUS * 2);
+            g2.setColor(new Color(255, 140, 40));
+            g2.setFont(new Font("SansSerif", Font.BOLD, 12));
+            String num = String.valueOf(i + 1);
+            FontMetrics fm = g2.getFontMetrics();
+            g2.drawString(num, n.x - fm.stringWidth(num) / 2, n.y + 4);
+        }
     }
 
     // -------------------------------------------------------------------------
